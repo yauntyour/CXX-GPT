@@ -143,12 +143,12 @@ int main()
     Dataset train_ds, val_ds;
 
     std::cout << "Loading dataset..." << std::endl;
-    if (!train_ds.load_jsonl("dataset/pretrain_t2t_mini.jsonl", tokenizer))
+    if (!train_ds.load_jsonl("dataset/train.jsonl", tokenizer))
     {
         std::cerr << "Failed to load training data!" << std::endl;
         return 1;
     }
-    val_ds.load_jsonl("dataset/pretrain_t2t_mini.jsonl", tokenizer);
+    val_ds.load_jsonl("dataset/val.jsonl", tokenizer);
 
     std::cout << "Train: " << train_ds.num_docs() << " docs, "
               << train_ds.num_tokens() << " tokens" << std::endl;
@@ -156,8 +156,8 @@ int main()
     GPTConfig cfg;
     cfg.vocab_size = tokenizer.vocab_size();
     cfg.block_size = 64;
-    cfg.n_embd = 384;
-    cfg.n_layer = 16;
+    cfg.n_embd = 128;
+    cfg.n_layer = 6;
 
     RNG rng(42);
     GPT model(cfg, rng);
@@ -174,14 +174,11 @@ int main()
     };
 
     size_t batch_size = 8;
-    int max_steps = 10000;
-    int eval_interval = 500;
+    int max_steps = 2769;
+    int eval_interval = 200;
     int eval_iters = 10;
 
     int start_step = 0;
-    if (load_checkpoint(model, optim, start_step)) {
-        std::cout << "Resuming from step " << start_step << std::endl;
-    }
 
 #ifdef _WIN32
     SetConsoleCtrlHandler(console_ctrl_handler, TRUE);
