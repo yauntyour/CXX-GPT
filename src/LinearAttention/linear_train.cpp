@@ -1,4 +1,4 @@
-#include "GPT/gpt.hpp"
+#include "LinearAttention/linear_gpt.hpp"
 #include "dataset.hpp"
 #include <iostream>
 #include <iomanip>
@@ -29,9 +29,9 @@ extern "C" void sigint_handler(int) {
 }
 #endif
 
-static constexpr const char* CHECKPOINT_FILE = "checkpoint.bin";
+static constexpr const char* CHECKPOINT_FILE = "linear_checkpoint.bin";
 
-void save_checkpoint(const GPT& model, const AdamW& optim, int step) {
+void save_checkpoint(const LinearGPT& model, const AdamW& optim, int step) {
     std::cout << "\nSaving checkpoint at step " << step << "..." << std::endl;
 
     std::ofstream f(CHECKPOINT_FILE, std::ios::binary);
@@ -40,7 +40,7 @@ void save_checkpoint(const GPT& model, const AdamW& optim, int step) {
         return;
     }
 
-    constexpr uint32_t magic = 0x434B5054;
+    constexpr uint32_t magic = 0x4C434B50;
     constexpr uint32_t version = 1;
     f.write(reinterpret_cast<const char*>(&magic), sizeof(uint32_t));
     f.write(reinterpret_cast<const char*>(&version), sizeof(uint32_t));
@@ -48,7 +48,7 @@ void save_checkpoint(const GPT& model, const AdamW& optim, int step) {
     int32_t s = static_cast<int32_t>(step);
     f.write(reinterpret_cast<const char*>(&s), sizeof(int32_t));
 
-    auto params = const_cast<GPT&>(model).parameters();
+    auto params = const_cast<LinearGPT&>(model).parameters();
     uint32_t np = static_cast<uint32_t>(params.size());
     f.write(reinterpret_cast<const char*>(&np), sizeof(uint32_t));
 
@@ -72,7 +72,7 @@ void save_checkpoint(const GPT& model, const AdamW& optim, int step) {
     std::cout << "Checkpoint saved to " << CHECKPOINT_FILE << std::endl;
 }
 
-bool load_checkpoint(GPT& model, AdamW& optim, int& step) {
+bool load_checkpoint(LinearGPT& model, AdamW& optim, int& step) {
     if (!std::filesystem::exists(CHECKPOINT_FILE)) {
         return false;
     }
@@ -84,7 +84,7 @@ bool load_checkpoint(GPT& model, AdamW& optim, int& step) {
     f.read(reinterpret_cast<char*>(&magic), sizeof(uint32_t));
     f.read(reinterpret_cast<char*>(&version), sizeof(uint32_t));
 
-    if (magic != 0x434B5054 || version != 1) {
+    if (magic != 0x4C434B50 || version != 1) {
         std::cerr << "Invalid checkpoint file!" << std::endl;
         return false;
     }
@@ -106,7 +106,6 @@ bool load_checkpoint(GPT& model, AdamW& optim, int& step) {
             f.read(reinterpret_cast<char*>(&shape[d]), sizeof(size_t));
             numel *= shape[d];
         }
-
         Tensor<float> cpu(shape);
         for (size_t i = 0; i < numel; i++) {
             float val = 0;
@@ -120,6 +119,19 @@ bool load_checkpoint(GPT& model, AdamW& optim, int& step) {
 
     std::cout << "Loaded checkpoint from step " << step << std::endl;
     return true;
+}
+
+float estimate_loss_linear(LinearGPT& model, Dataset& ds,
+    size_t batch_size, size_t block_size, RNG& rng, int num_batches)
+{
+    float total_loss = 0.0f;
+    for (int i = 0; i < num_batches; i++) {
+        auto [x, y] = ds.next_batch(batch_size, block_size);
+        auto logits = model.forward(x, batch_size, block_size);
+        auto [loss, dl] = cross_entropy_loss(logits, y);
+        total_loss += loss;
+    }
+    return total_loss / num_batches;
 }
 
 int main()
@@ -153,14 +165,18 @@ int main()
     std::cout << "Train: " << train_ds.num_docs() << " docs, "
               << train_ds.num_tokens() << " tokens" << std::endl;
 
-    GPTConfig cfg;
+    LinearGPTConfig cfg;
     cfg.vocab_size = tokenizer.vocab_size();
     cfg.block_size = 64;
-    cfg.n_embd = 384;
+    cfg.n_embd = 256;
     cfg.n_layer = 16;
 
+    size_t D = next_power_of_2(cfg.n_embd);
+    std::cout << "Embedding dim: " << cfg.n_embd
+              << ", Feature dim (D): " << D << std::endl;
+
     RNG rng(42);
-    GPT model(cfg, rng);
+    LinearGPT model(cfg, rng);
     std::cout << "Model parameters: " << model.total_params() << std::endl;
 
     auto params = model.parameters();
@@ -189,7 +205,7 @@ int main()
     signal(SIGINT, sigint_handler);
 #endif
 
-    std::cout << "\nStarting training..." << std::endl;
+    std::cout << "\n=== Training LinearGPT (Hadamard+Exp Kernel) ===" << std::endl;
     std::cout << std::fixed << std::setprecision(4);
 
     auto start_time = std::chrono::high_resolution_clock::now();
@@ -210,7 +226,7 @@ int main()
 
         if (step == 0) {
             std::cout << "Initial forward loss (raw): " << loss << std::endl;
-            numerical_grad_check(model, x, y, batch_size, cfg.block_size);
+            linear_numerical_grad_check(model, x, y, batch_size, cfg.block_size);
         }
 
         model.zero_grad();
@@ -219,10 +235,10 @@ int main()
         if (step % eval_interval == 0 || step == max_steps - 1)
         {
             float grad_norm = compute_grad_norm();
-            float train_loss = estimate_loss(model, train_ds,
-                                             batch_size, cfg.block_size, rng, eval_iters);
-            float val_loss = estimate_loss(model, val_ds,
-                                           batch_size, cfg.block_size, rng, eval_iters);
+            float train_loss = estimate_loss_linear(model, train_ds,
+                batch_size, cfg.block_size, rng, eval_iters);
+            float val_loss = estimate_loss_linear(model, val_ds,
+                batch_size, cfg.block_size, rng, eval_iters);
 
             auto now = std::chrono::high_resolution_clock::now();
             auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start_time).count();
@@ -245,7 +261,7 @@ int main()
     auto total_sec = std::chrono::duration_cast<std::chrono::seconds>(end_time - start_time).count();
     std::cout << "\nTraining completed in " << total_sec << "s" << std::endl;
 
-    model.save("model.bin");
+    model.save("linear_model.bin");
 
     if (std::filesystem::exists(CHECKPOINT_FILE)) {
         std::filesystem::remove(CHECKPOINT_FILE);
@@ -255,7 +271,6 @@ int main()
     catch (const std::bad_alloc& e)
     {
         std::cerr << "Memory allocation failed: " << e.what() << std::endl;
-        std::cerr << "Try reducing batch_size, block_size, n_embd, or n_layer." << std::endl;
         return 1;
     }
     catch (const std::runtime_error& e)

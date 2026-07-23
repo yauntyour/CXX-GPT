@@ -1,4 +1,4 @@
-#include "GPT/gpt.hpp"
+#include "LinearAttention/linear_gpt.hpp"
 #include <iostream>
 #include <iomanip>
 #include <string>
@@ -26,24 +26,22 @@ int main()
         }
         std::cout << "Vocabulary size: " << tokenizer.vocab_size() << std::endl;
 
-        GPTConfig cfg;
+        LinearGPTConfig cfg;
         cfg.vocab_size = tokenizer.vocab_size();
         cfg.block_size = 64;
-        cfg.n_embd = 384;
+        cfg.n_embd = 256;
         cfg.n_layer = 16;
 
         RNG rng(42);
-        GPT model(cfg, rng);
+        LinearGPT model(cfg, rng);
         std::cout << "Model parameters: " << model.total_params() << std::endl;
 
-        model.load("model.bin");
+        model.load("linear_model.bin");
 
         int eos_id = tokenizer.get_eos_id();
-        int bos_id = tokenizer.get_bos_id();
 
-        std::cout << "\n=== Interactive Chat ===" << std::endl;
-        std::cout << "Type 'quit' or 'exit' to stop.\n"
-                  << std::endl;
+        std::cout << "\n=== Interactive Chat (LinearGPT, Hadamard+Exp Kernel) ===" << std::endl;
+        std::cout << "Type 'quit' or 'exit' to stop.\n" << std::endl;
 
         std::string input;
         while (true)
@@ -73,10 +71,8 @@ int main()
             for (size_t i = prompt_len; i < ids.size(); i++)
             {
                 int id = ids[i];
-                if (id == eos_id)
-                    break;
-                if (id == bos_id)
-                    continue;
+                if (id == eos_id) break;
+                if (id == tokenizer.get_bos_id()) continue;
                 response += tokenizer.decode({id});
             }
 
