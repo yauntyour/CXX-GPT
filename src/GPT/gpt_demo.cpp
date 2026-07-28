@@ -26,7 +26,7 @@ int main()
         }
         std::cout << "Vocabulary size: " << tokenizer.vocab_size() << std::endl;
 
-        GPTConfig cfg = GPT::load_config("model.gguf");
+        GPTConfig cfg = GPT::load_config("gpt_model.gguf");
         std::cout << "Model config: n_embd=" << cfg.n_embd
                   << " n_layer=" << cfg.n_layer
                   << " block_size=" << cfg.block_size << std::endl;
@@ -55,7 +55,7 @@ int main()
                 break;
             }
 
-            std::string prompt_text = "<|im_start|>user:\n" + input;
+            std::string prompt_text = "<|im_start|>user:\n" + input + "<|im_end|>";
             std::vector<int> prompt_ids = tokenizer.encode(prompt_text);
             if (!prompt_ids.empty() && prompt_ids.back() == eos_id)
                 prompt_ids.pop_back();

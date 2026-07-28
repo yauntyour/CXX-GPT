@@ -40,7 +40,8 @@ int main()
         int eos_id = tokenizer.get_eos_id();
 
         std::cout << "\n=== Interactive Chat (LinearGPT, Hadamard+Exp Kernel) ===" << std::endl;
-        std::cout << "Type 'quit' or 'exit' to stop.\n" << std::endl;
+        std::cout << "Type 'quit' or 'exit' to stop.\n"
+                  << std::endl;
 
         std::string input;
         while (true)
@@ -53,7 +54,7 @@ int main()
                 break;
             }
 
-            std::string prompt_text = "<|im_start|>user\n" + input;
+            std::string prompt_text = "<|im_start|>user\n" + input + "<|im_end|>";
             std::vector<int> prompt_ids = tokenizer.encode(prompt_text);
             if (!prompt_ids.empty() && prompt_ids.back() == eos_id)
                 prompt_ids.pop_back();
@@ -70,12 +71,14 @@ int main()
             for (size_t i = prompt_len; i < ids.size(); i++)
             {
                 int id = ids[i];
-                if (id == eos_id) break;
-                if (id == tokenizer.get_bos_id()) continue;
+                if (id == eos_id)
+                    break;
+                if (id == tokenizer.get_bos_id())
+                    continue;
                 response += tokenizer.decode({id});
             }
 
-            std::cout << "Bot: " << response << "  [" << ms << "ms]" << std::endl;
+            std::cout << "Bot: " << response << "\r\n[" << ms << "ms]" << std::endl;
             std::cout << std::endl;
         }
     }
