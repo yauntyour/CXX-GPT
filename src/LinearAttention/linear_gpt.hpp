@@ -61,6 +61,82 @@ inline CudaTensor<float> compute_phi(const CudaTensor<float>& x,
     return phi;
 }
 
+inline CudaTensor<float> compute_phi_polynomial(const CudaTensor<float>& x, size_t D, size_t E)
+{
+    size_t N = x.shape()[0];
+    // 计算 x 的平方和：norm_sq = sum(x^2, axis=1)
+    CudaTensor<float> x_sq({N, E});
+    TensorN::cuda::multiply(x, x, x_sq);
+    CudaTensor<float> norm_sq = TensorN::cuda::sum_axis(x_sq, 1); // 形状 [N]
+    // 计算 x^2 + 1
+    CudaTensor<float> norm_sq_plus1({N});
+    TensorN::cuda::add_scalar(norm_sq, 1.0f, norm_sq_plus1);
+    // 构造 phi，形状 [N, D]
+    CudaTensor<float> phi({N, D});
+    // 将 phi 初始化为零
+    TensorN::cuda::multiply_scalar(phi, 0.0f, phi);
+    // 设置第一个分量：phi[:, 0] = norm_sq_plus1
+    // 我们将 norm_sq_plus1 视为列向量 [N, 1]，与全 1 行向量 [1, D] 相乘，但只取第一列
+    // 更高效的方法是直接赋值，但我们没有切片操作。
+    // 作为临时解决方案，我们使用循环填充第一列。
+    // 注意：这会在 GPU 上产生同步开销，但暂时可以接受。
+    // 将 norm_sq_plus1 复制到主机，然后逐元素设置。
+    auto norm_sq_plus1_cpu = norm_sq_plus1.toTensor();
+    auto phi_cpu = phi.toTensor();
+    for (size_t i = 0; i < N; ++i) {
+        phi_cpu[i * D + 0] = norm_sq_plus1_cpu[i];
+    }
+    // 对于 i = 1..E-1，设置 phi[:, i] = norm_sq_plus1 * x[:, i-1]
+    auto x_cpu = x.toTensor();
+    for (size_t i = 0; i < N; ++i) {
+        float scale = norm_sq_plus1_cpu[i];
+        for (size_t j = 1; j < E; ++j) {
+            phi_cpu[i * D + j] = scale * x_cpu[i * E + (j-1)];
+        }
+    }
+    // 将结果复制回 GPU
+    phi.copyFromHost(phi_cpu.data->data(), N * D);
+    return phi;
+}
+
+inline void backward_phi_polynomial(const CudaTensor<float>& dphi,
+    const CudaTensor<float>& x, const CudaTensor<float>& norm_sq_plus1,
+    size_t D, size_t E, CudaTensor<float>& dx)
+{
+    size_t N = dphi.shape()[0];
+    // 将数据复制到主机
+    auto dphi_cpu = dphi.toTensor();
+    auto x_cpu = x.toTensor();
+    auto norm_sq_plus1_cpu = norm_sq_plus1.toTensor();
+    auto dx_cpu = dx.toTensor();
+    // 初始化 dx 为零
+    for (size_t i = 0; i < N * E; ++i) dx_cpu[i] = 0.0f;
+    // 计算梯度
+    for (size_t i = 0; i < N; ++i) {
+        float B = norm_sq_plus1_cpu[i];
+        // 来自 φ0 的梯度
+        float dphi0 = dphi_cpu[i * D + 0];
+        for (size_t j = 0; j < E; ++j) {
+            // ∂φ0/∂x_j = 2 * x_j
+            dx_cpu[i * E + j] += dphi0 * 2.0f * x_cpu[i * E + j];
+        }
+        // 来自 φk (k=1..E) 的梯度
+        for (size_t k = 1; k <= E; ++k) {
+            float dphik = dphi_cpu[i * D + k];
+            // φk = B * x_{k-1}
+            // ∂φk/∂x_j = 2 * x_j * x_{k-1} + B * δ_{j, k-1}
+            float x_km1 = x_cpu[i * E + (k-1)];
+            for (size_t j = 0; j < E; ++j) {
+                float grad = 2.0f * x_cpu[i * E + j] * x_km1;
+                if (j == k-1) grad += B;
+                dx_cpu[i * E + j] += dphik * grad;
+            }
+        }
+    }
+    // 将结果复制回 GPU
+    dx.copyFromHost(dx_cpu.data->data(), N * E);
+}
+
 inline void backward_phi(const CudaTensor<float>& dphi,
     const CudaTensor<float>& phi, const CudaTensor<float>& H,
     size_t D, size_t E, CudaTensor<float>& dx)
@@ -92,6 +168,7 @@ public:
         CudaTensor<float> ln1_out_cache;
         CudaTensor<float> Q_cache, K_cache, V_cache;
         CudaTensor<float> Q_phi_cache, K_phi_cache;
+        CudaTensor<float> Q_norm_sq_plus1_cache, K_norm_sq_plus1_cache;
         CudaTensor<float> O_cache;
         CudaTensor<float> den_cache, z_cache;
         CudaTensor<float> resid2_cache;
@@ -123,8 +200,21 @@ public:
             K_cache = attn_k.forward(xn);
             V_cache = attn_v.forward(xn);
 
-            Q_phi_cache = compute_phi(Q_cache, *H_ptr, D, E);
-            K_phi_cache = compute_phi(K_cache, *H_ptr, D, E);
+            Q_phi_cache = compute_phi_polynomial(Q_cache, D, E);
+            K_phi_cache = compute_phi_polynomial(K_cache, D, E);
+            // 我们需要计算 norm_sq_plus1 用于反向传播，但 compute_phi_polynomial 已经计算了它，但没有返回。
+            // 我们需要修改 compute_phi_polynomial 以返回 norm_sq_plus1。
+            // 暂时，我们重新计算它，尽管效率低下。
+            // 在下一步中，我们将修改函数以返回 norm_sq_plus1。
+            // 为了快速实现，我们在这里重新计算。
+            CudaTensor<float> Q_sq({Q_cache.shape()[0], E});
+            TensorN::cuda::multiply(Q_cache, Q_cache, Q_sq);
+            Q_norm_sq_plus1_cache = TensorN::cuda::sum_axis(Q_sq, 1);
+            TensorN::cuda::add_scalar(Q_norm_sq_plus1_cache, 1.0f, Q_norm_sq_plus1_cache);
+            CudaTensor<float> K_sq({K_cache.shape()[0], E});
+            TensorN::cuda::multiply(K_cache, K_cache, K_sq);
+            K_norm_sq_plus1_cache = TensorN::cuda::sum_axis(K_sq, 1);
+            TensorN::cuda::add_scalar(K_norm_sq_plus1_cache, 1.0f, K_norm_sq_plus1_cache);
 
             S_buf = CudaTensor<float>({B * D, E});
             z_buf = CudaTensor<float>({B, D});
@@ -192,9 +282,9 @@ public:
                 B, S, D, E);
 
             CudaTensor<float> dQ({dim, E});
-            backward_phi(dQ_phi, Q_phi_cache, *H_ptr, D, E, dQ);
+            backward_phi_polynomial(dQ_phi, Q_cache, Q_norm_sq_plus1_cache, D, E, dQ);
             CudaTensor<float> dK({dim, E});
-            backward_phi(dK_phi, K_phi_cache, *H_ptr, D, E, dK);
+            backward_phi_polynomial(dK_phi, K_cache, K_norm_sq_plus1_cache, D, E, dK);
 
             auto dx_q = attn_q.backward(dQ);
             auto dx_k = attn_k.backward(dK);
