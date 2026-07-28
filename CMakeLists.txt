@@ -10,11 +10,11 @@ set(TENSORN_BUILD_BENCHMARKS OFF)
 add_subdirectory(TensorN)
 
 # Original GPT model (softmax attention)
-add_executable(gpt_train src/train.cpp src/cuda_kernels.cu)
+add_executable(gpt_train src/GPT/gpt_train.cpp src/GPT/gpt_cuda_kernels.cu)
 target_include_directories(gpt_train PRIVATE src)
 target_link_libraries(gpt_train PRIVATE TensorN)
 
-add_executable(gpt_demo src/demo.cpp src/cuda_kernels.cu)
+add_executable(gpt_demo src/GPT/gpt_demo.cpp src/GPT/gpt_cuda_kernels.cu)
 target_include_directories(gpt_demo PRIVATE src)
 target_link_libraries(gpt_demo PRIVATE TensorN)
 
@@ -22,7 +22,7 @@ target_link_libraries(gpt_demo PRIVATE TensorN)
 add_executable(linear_train
     src/LinearAttention/linear_train.cpp
     src/LinearAttention/linear_cuda_kernels.cu
-    src/cuda_kernels.cu
+    src/GPT/gpt_cuda_kernels.cu
 )
 target_include_directories(linear_train PRIVATE src)
 target_link_libraries(linear_train PRIVATE TensorN)
@@ -30,7 +30,7 @@ target_link_libraries(linear_train PRIVATE TensorN)
 add_executable(linear_demo
     src/LinearAttention/linear_demo.cpp
     src/LinearAttention/linear_cuda_kernels.cu
-    src/cuda_kernels.cu
+    src/GPT/gpt_cuda_kernels.cu
 )
 target_include_directories(linear_demo PRIVATE src)
 target_link_libraries(linear_demo PRIVATE TensorN)

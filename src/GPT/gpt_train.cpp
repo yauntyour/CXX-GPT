@@ -1,4 +1,4 @@
-#include "GPT/gpt.hpp"
+#include "gpt_gpt.hpp"
 #include "dataset.hpp"
 #include <iostream>
 #include <iomanip>

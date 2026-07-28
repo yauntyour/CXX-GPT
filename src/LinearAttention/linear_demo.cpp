@@ -26,11 +26,10 @@ int main()
         }
         std::cout << "Vocabulary size: " << tokenizer.vocab_size() << std::endl;
 
-        LinearGPTConfig cfg;
-        cfg.vocab_size = tokenizer.vocab_size();
-        cfg.block_size = 64;
-        cfg.n_embd = 256;
-        cfg.n_layer = 16;
+        LinearGPTConfig cfg = LinearGPT::load_config("linear_model.gguf");
+        std::cout << "Model config: n_embd=" << cfg.n_embd
+                  << " n_layer=" << cfg.n_layer
+                  << " block_size=" << cfg.block_size << std::endl;
 
         RNG rng(42);
         LinearGPT model(cfg, rng);

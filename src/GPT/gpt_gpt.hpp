@@ -1,7 +1,7 @@
 #pragma once
 
 #include "TensorN.hpp"
-#include "cuda_kernels.cuh"
+#include "gpt_cuda_kernels.cuh"
 #include <vector>
 #include <string>
 #include <array>
@@ -584,6 +584,32 @@ public:
 
         save_gguf_multi(tensors, gguf_path, meta);
         std::cout << "Model saved to " << gguf_path << " (" << tensors.size() << " tensors)" << std::endl;
+    }
+
+    static GPTConfig load_config(const std::string& path) {
+        auto meta = gguf_read_metadata(path);
+        GPTConfig cfg;
+
+        auto get_u64 = [&](const std::string& key, size_t& target) {
+            auto it = meta.find(key);
+            if (it != meta.end()) {
+                if (std::holds_alternative<uint64_t>(it->second))
+                    target = (size_t)std::get<uint64_t>(it->second);
+                else if (std::holds_alternative<int64_t>(it->second))
+                    target = (size_t)std::get<int64_t>(it->second);
+            }
+        };
+
+        get_u64("cxxgpt.vocab_size", cfg.vocab_size);
+        get_u64("cxxgpt.block_size", cfg.block_size);
+        get_u64("cxxgpt.n_embd", cfg.n_embd);
+        get_u64("cxxgpt.n_layer", cfg.n_layer);
+
+        auto it_eps = meta.find("cxxgpt.layer_norm_epsilon");
+        if (it_eps != meta.end() && std::holds_alternative<float>(it_eps->second))
+            cfg.ln_eps = std::get<float>(it_eps->second);
+
+        return cfg;
     }
 
     void load(const std::string& path) {

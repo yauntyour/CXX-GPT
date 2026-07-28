@@ -1,4 +1,4 @@
-#include "GPT/gpt.hpp"
+#include "gpt_gpt.hpp"
 #include <iostream>
 #include <iomanip>
 #include <string>
@@ -26,11 +26,10 @@ int main()
         }
         std::cout << "Vocabulary size: " << tokenizer.vocab_size() << std::endl;
 
-        GPTConfig cfg;
-        cfg.vocab_size = tokenizer.vocab_size();
-        cfg.block_size = 64;
-        cfg.n_embd = 384;
-        cfg.n_layer = 16;
+        GPTConfig cfg = GPT::load_config("model.gguf");
+        std::cout << "Model config: n_embd=" << cfg.n_embd
+                  << " n_layer=" << cfg.n_layer
+                  << " block_size=" << cfg.block_size << std::endl;
 
         RNG rng(42);
         GPT model(cfg, rng);
@@ -56,7 +55,7 @@ int main()
                 break;
             }
 
-            std::string prompt_text = "<|im_start|>user\n" + input;
+            std::string prompt_text = "<|im_start|>user:\n" + input;
             std::vector<int> prompt_ids = tokenizer.encode(prompt_text);
             if (!prompt_ids.empty() && prompt_ids.back() == eos_id)
                 prompt_ids.pop_back();
@@ -80,7 +79,7 @@ int main()
                 response += tokenizer.decode({id});
             }
 
-            std::cout << "Bot: " << response << "  [" << ms << "ms]" << std::endl;
+            std::cout << "Bot: " << response << "\r\n[" << ms << "ms]" << std::endl;
             std::cout << std::endl;
         }
     }

@@ -1,4 +1,4 @@
-#include "cuda_kernels.cuh"
+#include "gpt_cuda_kernels.cuh"
 
 #ifdef TENSORN_CUDA_AVAILABLE
 
