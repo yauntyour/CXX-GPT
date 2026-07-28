@@ -36,7 +36,7 @@ int main()
         GPT model(cfg, rng);
         std::cout << "Model parameters: " << model.total_params() << std::endl;
 
-        model.load("model.bin");
+        model.load("model.gguf");
 
         int eos_id = tokenizer.get_eos_id();
         int bos_id = tokenizer.get_bos_id();

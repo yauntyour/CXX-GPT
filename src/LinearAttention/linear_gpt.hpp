@@ -386,6 +386,36 @@ public:
         for (auto& blk : blocks) blk.zero_grad();
     }
 
+    std::vector<std::pair<std::string, Param*>> named_parameters() {
+        std::vector<std::pair<std::string, Param*>> np;
+        np.push_back({"wte.weight", &wte.weight});
+        np.push_back({"wpe.weight", &wpe.weight});
+        np.push_back({"ln_f.gamma", &ln_f.gamma});
+        np.push_back({"ln_f.beta", &ln_f.beta});
+        np.push_back({"lm_head.W", &lm_head.W});
+        np.push_back({"lm_head.b", &lm_head.b});
+        for (size_t i = 0; i < blocks.size(); i++) {
+            std::string prefix = "blocks." + std::to_string(i) + ".";
+            np.push_back({prefix + "ln_1.gamma", &blocks[i].ln_1.gamma});
+            np.push_back({prefix + "ln_1.beta", &blocks[i].ln_1.beta});
+            np.push_back({prefix + "ln_2.gamma", &blocks[i].ln_2.gamma});
+            np.push_back({prefix + "ln_2.beta", &blocks[i].ln_2.beta});
+            np.push_back({prefix + "attn_q.W", &blocks[i].attn_q.W});
+            np.push_back({prefix + "attn_q.b", &blocks[i].attn_q.b});
+            np.push_back({prefix + "attn_k.W", &blocks[i].attn_k.W});
+            np.push_back({prefix + "attn_k.b", &blocks[i].attn_k.b});
+            np.push_back({prefix + "attn_v.W", &blocks[i].attn_v.W});
+            np.push_back({prefix + "attn_v.b", &blocks[i].attn_v.b});
+            np.push_back({prefix + "attn_proj.W", &blocks[i].attn_proj.W});
+            np.push_back({prefix + "attn_proj.b", &blocks[i].attn_proj.b});
+            np.push_back({prefix + "mlp_fc.W", &blocks[i].mlp_fc.W});
+            np.push_back({prefix + "mlp_fc.b", &blocks[i].mlp_fc.b});
+            np.push_back({prefix + "mlp_proj.W", &blocks[i].mlp_proj.W});
+            np.push_back({prefix + "mlp_proj.b", &blocks[i].mlp_proj.b});
+        }
+        return np;
+    }
+
     std::vector<Param*> parameters() {
         std::vector<Param*> ps;
         for (auto* p : wte.parameters()) ps.push_back(p);
@@ -417,102 +447,55 @@ public:
     }
 
     void save(const std::string& path) const {
-        std::ofstream f(path, std::ios::binary);
-        if (!f.is_open()) {
-            std::cerr << "Cannot open for writing: " << path << std::endl;
-            return;
+        std::string gguf_path = path;
+        if (gguf_path.size() < 5 || gguf_path.substr(gguf_path.size() - 5) != ".gguf") {
+            gguf_path += ".gguf";
         }
 
-        constexpr uint32_t magic = 0x4C474D44;
-        constexpr uint32_t version = 1;
-
-        f.write(reinterpret_cast<const char*>(&magic), sizeof(uint32_t));
-        f.write(reinterpret_cast<const char*>(&version), sizeof(uint32_t));
-
-        size_t vs = cfg.vocab_size, bs = cfg.block_size;
-        size_t ne = cfg.n_embd, nl = cfg.n_layer;
-        float eps = cfg.ln_eps;
-        f.write(reinterpret_cast<const char*>(&vs), sizeof(size_t));
-        f.write(reinterpret_cast<const char*>(&bs), sizeof(size_t));
-        f.write(reinterpret_cast<const char*>(&ne), sizeof(size_t));
-        f.write(reinterpret_cast<const char*>(&nl), sizeof(size_t));
-        f.write(reinterpret_cast<const char*>(&eps), sizeof(float));
-
-        auto params = const_cast<LinearGPT*>(this)->parameters();
-        uint32_t np = static_cast<uint32_t>(params.size());
-        f.write(reinterpret_cast<const char*>(&np), sizeof(uint32_t));
-
-        for (auto* p : params) {
-            auto cpu = p->data.toTensor();
-            auto sh = cpu.shape();
-            uint32_t ndim = static_cast<uint32_t>(sh.size());
-            f.write(reinterpret_cast<const char*>(&ndim), sizeof(uint32_t));
-            for (size_t d = 0; d < sh.size(); d++) {
-                size_t dim = sh[d];
-                f.write(reinterpret_cast<const char*>(&dim), sizeof(size_t));
-            }
-            for (size_t i = 0; i < cpu.size(); i++) {
-                float val = cpu[i];
-                f.write(reinterpret_cast<const char*>(&val), sizeof(float));
-            }
+        std::vector<std::pair<std::string, Tensor<float>>> tensors;
+        auto named = const_cast<LinearGPT*>(this)->named_parameters();
+        for (auto& [name, param] : named) {
+            tensors.push_back({name, param->data.toTensor()});
         }
 
-        std::cout << "Model saved to " << path << " (" << np << " params)" << std::endl;
+        std::unordered_map<std::string, GGUFMetadataValue> meta;
+        meta["general.architecture"] = std::string("cxxlinear");
+        meta["general.name"] = std::string("CXX-LinearGPT");
+        meta["cxxlinear.vocab_size"] = uint64_t(cfg.vocab_size);
+        meta["cxxlinear.block_size"] = uint64_t(cfg.block_size);
+        meta["cxxlinear.n_embd"] = uint64_t(cfg.n_embd);
+        meta["cxxlinear.n_layer"] = uint64_t(cfg.n_layer);
+        meta["cxxlinear.layer_norm_epsilon"] = cfg.ln_eps;
+
+        save_gguf_multi(tensors, gguf_path, meta);
+        std::cout << "Model saved to " << gguf_path << " (" << tensors.size() << " tensors)" << std::endl;
     }
 
     void load(const std::string& path) {
-        std::ifstream f(path, std::ios::binary);
-        if (!f.is_open()) {
-            std::cerr << "Cannot open for reading: " << path << std::endl;
-            return;
-        }
+        auto meta = gguf_read_metadata(path);
 
-        constexpr uint32_t magic = 0x4C474D44;
-
-        uint32_t fmagic = 0, fversion = 0;
-        f.read(reinterpret_cast<char*>(&fmagic), sizeof(uint32_t));
-        f.read(reinterpret_cast<char*>(&fversion), sizeof(uint32_t));
-
-        if (fmagic != magic) {
-            std::cerr << "Invalid model file: bad magic" << std::endl;
-            return;
-        }
-
-        size_t vs = 0, bs = 0, ne = 0, nl = 0;
-        float eps = 0;
-        f.read(reinterpret_cast<char*>(&vs), sizeof(size_t));
-        f.read(reinterpret_cast<char*>(&bs), sizeof(size_t));
-        f.read(reinterpret_cast<char*>(&ne), sizeof(size_t));
-        f.read(reinterpret_cast<char*>(&nl), sizeof(size_t));
-        f.read(reinterpret_cast<char*>(&eps), sizeof(float));
-
-        uint32_t np = 0;
-        f.read(reinterpret_cast<char*>(&np), sizeof(uint32_t));
-
-        auto params = parameters();
-        for (uint32_t pi = 0; pi < np && pi < (uint32_t)params.size(); pi++) {
-            uint32_t ndim = 0;
-            f.read(reinterpret_cast<char*>(&ndim), sizeof(uint32_t));
-            std::vector<size_t> shape(ndim);
-            size_t numel = 1;
-            for (uint32_t d = 0; d < ndim; d++) {
-                f.read(reinterpret_cast<char*>(&shape[d]), sizeof(size_t));
-                numel *= shape[d];
+        auto it_arch = meta.find("general.architecture");
+        if (it_arch != meta.end() && std::holds_alternative<std::string>(it_arch->second)) {
+            std::string arch = std::get<std::string>(it_arch->second);
+            if (arch != "cxxlinear") {
+                std::cerr << "Warning: model architecture is '" << arch << "', expected 'cxxlinear'" << std::endl;
             }
-            Tensor<float> cpu(shape);
-            for (size_t i = 0; i < numel; i++) {
-                float val = 0;
-                f.read(reinterpret_cast<char*>(&val), sizeof(float));
-                cpu[i] = val;
+        }
+
+        auto tensors = load_gguf_multi<float>(path);
+        auto named = named_parameters();
+
+        size_t loaded = 0;
+        for (auto& [name, param] : named) {
+            if (tensors.count(name)) {
+                param->data = CudaTensor<float>::fromTensor(tensors[name]);
+                loaded++;
+            } else {
+                std::cerr << "Warning: missing tensor '" << name << "'" << std::endl;
             }
-            params[pi]->data = CudaTensor<float>::fromTensor(cpu);
         }
 
-        if (!f) {
-            std::cerr << "Warning: partial or corrupt model file" << std::endl;
-        }
-
-        std::cout << "Model loaded from " << path << " (" << np << " params)" << std::endl;
+        std::cout << "Model loaded from " << path << " (" << loaded << " tensors)" << std::endl;
     }
 
     std::vector<int> generate(const std::vector<int>& prompt, size_t max_new_tokens,

@@ -29,46 +29,33 @@ extern "C" void sigint_handler(int) {
 }
 #endif
 
-static constexpr const char* CHECKPOINT_FILE = "checkpoint.bin";
+static constexpr const char* CHECKPOINT_FILE = "checkpoint.gguf";
+static constexpr const char* MODEL_FILE = "model.gguf";
 
 void save_checkpoint(const GPT& model, const AdamW& optim, int step) {
     std::cout << "\nSaving checkpoint at step " << step << "..." << std::endl;
 
-    std::ofstream f(CHECKPOINT_FILE, std::ios::binary);
-    if (!f.is_open()) {
-        std::cerr << "Failed to open checkpoint for writing!" << std::endl;
-        return;
+    std::vector<std::pair<std::string, Tensor<float>>> tensors;
+
+    auto named = const_cast<GPT&>(model).named_parameters();
+    for (auto& [name, param] : named) {
+        tensors.push_back({"model." + name, param->data.toTensor()});
     }
 
-    constexpr uint32_t magic = 0x434B5054;
-    constexpr uint32_t version = 1;
-    f.write(reinterpret_cast<const char*>(&magic), sizeof(uint32_t));
-    f.write(reinterpret_cast<const char*>(&version), sizeof(uint32_t));
-
-    int32_t s = static_cast<int32_t>(step);
-    f.write(reinterpret_cast<const char*>(&s), sizeof(int32_t));
-
-    auto params = const_cast<GPT&>(model).parameters();
-    uint32_t np = static_cast<uint32_t>(params.size());
-    f.write(reinterpret_cast<const char*>(&np), sizeof(uint32_t));
-
-    for (auto* p : params) {
-        auto cpu = p->data.toTensor();
-        auto sh = cpu.shape();
-        uint32_t ndim = static_cast<uint32_t>(sh.size());
-        f.write(reinterpret_cast<const char*>(&ndim), sizeof(uint32_t));
-        for (size_t d = 0; d < sh.size(); d++) {
-            size_t dim = sh[d];
-            f.write(reinterpret_cast<const char*>(&dim), sizeof(size_t));
-        }
-        for (size_t i = 0; i < cpu.size(); i++) {
-            float val = cpu[i];
-            f.write(reinterpret_cast<const char*>(&val), sizeof(float));
-        }
+    auto opt_state = optim.named_state();
+    for (auto& [name, tensor] : opt_state) {
+        tensors.push_back({"optimizer." + name, tensor});
     }
 
-    optim.save(f);
+    std::unordered_map<std::string, GGUFMetadataValue> meta;
+    meta["general.architecture"] = std::string("cxxgpt_checkpoint");
+    meta["checkpoint.step"] = int32_t(step);
+    meta["optimizer.learning_rate"] = optim.learning_rate();
+    meta["optimizer.beta1"] = optim.get_beta1();
+    meta["optimizer.beta2"] = optim.get_beta2();
+    meta["optimizer.weight_decay"] = optim.get_weight_decay();
 
+    save_gguf_multi(tensors, CHECKPOINT_FILE, meta);
     std::cout << "Checkpoint saved to " << CHECKPOINT_FILE << std::endl;
 }
 
@@ -77,49 +64,38 @@ bool load_checkpoint(GPT& model, AdamW& optim, int& step) {
         return false;
     }
 
-    std::ifstream f(CHECKPOINT_FILE, std::ios::binary);
-    if (!f.is_open()) return false;
+    try {
+        auto meta = gguf_read_metadata(CHECKPOINT_FILE);
 
-    uint32_t magic = 0, version = 0;
-    f.read(reinterpret_cast<char*>(&magic), sizeof(uint32_t));
-    f.read(reinterpret_cast<char*>(&version), sizeof(uint32_t));
+        auto it_step = meta.find("checkpoint.step");
+        if (it_step != meta.end() && std::holds_alternative<int32_t>(it_step->second)) {
+            step = std::get<int32_t>(it_step->second);
+        }
 
-    if (magic != 0x434B5054 || version != 1) {
-        std::cerr << "Invalid checkpoint file!" << std::endl;
+        auto tensors = load_gguf_multi<float>(CHECKPOINT_FILE);
+
+        auto named = model.named_parameters();
+        for (auto& [name, param] : named) {
+            std::string key = "model." + name;
+            if (tensors.count(key)) {
+                param->data = CudaTensor<float>::fromTensor(tensors[key]);
+            }
+        }
+
+        std::unordered_map<std::string, Tensor<float>> opt_state;
+        for (auto& [key, tensor] : tensors) {
+            if (key.substr(0, 10) == "optimizer.") {
+                opt_state[key.substr(10)] = tensor;
+            }
+        }
+        optim.load_state(opt_state, step);
+
+        std::cout << "Loaded checkpoint from step " << step << std::endl;
+        return true;
+    } catch (const std::exception& e) {
+        std::cerr << "Failed to load checkpoint: " << e.what() << std::endl;
         return false;
     }
-
-    int32_t s = 0;
-    f.read(reinterpret_cast<char*>(&s), sizeof(int32_t));
-    step = static_cast<int>(s);
-
-    uint32_t np = 0;
-    f.read(reinterpret_cast<char*>(&np), sizeof(uint32_t));
-
-    auto params = model.parameters();
-    for (uint32_t pi = 0; pi < np && pi < (uint32_t)params.size(); pi++) {
-        uint32_t ndim = 0;
-        f.read(reinterpret_cast<char*>(&ndim), sizeof(uint32_t));
-        std::vector<size_t> shape(ndim);
-        size_t numel = 1;
-        for (uint32_t d = 0; d < ndim; d++) {
-            f.read(reinterpret_cast<char*>(&shape[d]), sizeof(size_t));
-            numel *= shape[d];
-        }
-
-        Tensor<float> cpu(shape);
-        for (size_t i = 0; i < numel; i++) {
-            float val = 0;
-            f.read(reinterpret_cast<char*>(&val), sizeof(float));
-            cpu[i] = val;
-        }
-        params[pi]->data = CudaTensor<float>::fromTensor(cpu);
-    }
-
-    optim.load(f);
-
-    std::cout << "Loaded checkpoint from step " << step << std::endl;
-    return true;
 }
 
 int main()
@@ -242,7 +218,7 @@ int main()
     auto total_sec = std::chrono::duration_cast<std::chrono::seconds>(end_time - start_time).count();
     std::cout << "\nTraining completed in " << total_sec << "s" << std::endl;
 
-    model.save("model.bin");
+    model.save(MODEL_FILE);
 
     if (std::filesystem::exists(CHECKPOINT_FILE)) {
         std::filesystem::remove(CHECKPOINT_FILE);

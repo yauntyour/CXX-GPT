@@ -36,7 +36,7 @@ int main()
         LinearGPT model(cfg, rng);
         std::cout << "Model parameters: " << model.total_params() << std::endl;
 
-        model.load("linear_model.bin");
+        model.load("linear_model.gguf");
 
         int eos_id = tokenizer.get_eos_id();
 
