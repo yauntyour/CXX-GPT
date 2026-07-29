@@ -7,8 +7,10 @@
 
 using namespace TensorN;
 
-static size_t next_power_of_2(size_t n) {
-    if (n == 0) return 1;
+static size_t next_power_of_2(size_t n)
+{
+    if (n == 0)
+        return 1;
     n--;
     n |= n >> 1;
     n |= n >> 2;
@@ -19,14 +21,18 @@ static size_t next_power_of_2(size_t n) {
     return n + 1;
 }
 
-static Tensor<float> generate_hadamard_submatrix(size_t D, size_t E) {
+static Tensor<float> generate_hadamard_submatrix(size_t D, size_t E)
+{
     std::vector<float> full(D * D, 0.0f);
     full[0] = 1.0f;
-    for (size_t k = 1; k < D; k *= 2) {
-        for (size_t i = 0; i < k; i++) {
-            for (size_t j = 0; j < k; j++) {
-                full[i * D + j + k]       =  full[i * D + j];
-                full[(i + k) * D + j]     =  full[i * D + j];
+    for (size_t k = 1; k < D; k *= 2)
+    {
+        for (size_t i = 0; i < k; i++)
+        {
+            for (size_t j = 0; j < k; j++)
+            {
+                full[i * D + j + k] = full[i * D + j];
+                full[(i + k) * D + j] = full[i * D + j];
                 full[(i + k) * D + j + k] = -full[i * D + j];
             }
         }
@@ -38,7 +44,8 @@ static Tensor<float> generate_hadamard_submatrix(size_t D, size_t E) {
     return H_sub;
 }
 
-struct LinearGPTConfig {
+struct LinearGPTConfig
+{
     size_t vocab_size = 4096;
     size_t block_size = 64;
     size_t n_embd = 256;
@@ -46,8 +53,8 @@ struct LinearGPTConfig {
     float ln_eps = 1e-5f;
 };
 
-inline CudaTensor<float> compute_phi(const CudaTensor<float>& x,
-    const CudaTensor<float>& H, size_t D, size_t E)
+inline CudaTensor<float> compute_phi(const CudaTensor<float> &x,
+                                     const CudaTensor<float> &H, size_t D, size_t E)
 {
     size_t N = x.shape()[0];
     float inv_sqrt_E = 1.0f / std::sqrt((float)E);
@@ -61,25 +68,24 @@ inline CudaTensor<float> compute_phi(const CudaTensor<float>& x,
     return phi;
 }
 
-inline void compute_phi_polynomial(const CudaTensor<float>& x, size_t D, size_t E,
-    CudaTensor<float>& phi, CudaTensor<float>& norm_sq_plus1)
+inline void compute_phi_elu(const CudaTensor<float> &x, size_t D, size_t E,
+                            CudaTensor<float> &phi)
 {
     size_t N = x.shape()[0];
     phi = CudaTensor<float>({N, D});
-    norm_sq_plus1 = CudaTensor<float>({N});
-    linear_cuda::phi_polynomial_forward(x, phi, norm_sq_plus1, D, E);
+    linear_cuda::phi_elu_forward(x, phi, D, E);
 }
 
-inline void backward_phi_polynomial(const CudaTensor<float>& dphi,
-    const CudaTensor<float>& x, const CudaTensor<float>& norm_sq_plus1,
-    size_t D, size_t E, CudaTensor<float>& dx)
+inline void backward_phi_elu(const CudaTensor<float> &dphi,
+                             const CudaTensor<float> &x,
+                             size_t D, size_t E, CudaTensor<float> &dx)
 {
-    linear_cuda::phi_polynomial_backward(dphi, x, norm_sq_plus1, dx, D, E);
+    linear_cuda::phi_elu_backward(dphi, x, dx, D, E);
 }
 
-inline void backward_phi(const CudaTensor<float>& dphi,
-    const CudaTensor<float>& phi, const CudaTensor<float>& H,
-    size_t D, size_t E, CudaTensor<float>& dx)
+inline void backward_phi(const CudaTensor<float> &dphi,
+                         const CudaTensor<float> &phi, const CudaTensor<float> &H,
+                         size_t D, size_t E, CudaTensor<float> &dx)
 {
     size_t N = dphi.shape()[0];
     float inv_sqrt_E = 1.0f / std::sqrt((float)E);
@@ -89,7 +95,8 @@ inline void backward_phi(const CudaTensor<float>& dphi,
     TensorN::cuda::multiply_scalar(dx, inv_sqrt_E, dx);
 }
 
-class LinearGPT {
+class LinearGPT
+{
 public:
     LinearGPTConfig cfg;
     size_t D;
@@ -99,7 +106,8 @@ public:
     Embedding wte, wpe;
     CudaTensor<float> wpe_all;
 
-    struct LinearBlock {
+    struct LinearBlock
+    {
         LayerNorm ln_1, ln_2;
         Linear attn_q, attn_k, attn_v, attn_proj;
         Linear mlp_fc, mlp_proj;
@@ -108,7 +116,6 @@ public:
         CudaTensor<float> ln1_out_cache;
         CudaTensor<float> Q_cache, K_cache, V_cache;
         CudaTensor<float> Q_phi_cache, K_phi_cache;
-        CudaTensor<float> Q_norm_sq_plus1_cache, K_norm_sq_plus1_cache;
         CudaTensor<float> O_cache;
         CudaTensor<float> den_cache, z_cache;
         CudaTensor<float> resid2_cache;
@@ -117,19 +124,23 @@ public:
         CudaTensor<float> S_buf, z_buf;
 
         size_t B_cur, S_cur, E_cur, D_cur;
-        const CudaTensor<float>* H_ptr;
+        const CudaTensor<float> *H_ptr;
 
         LinearBlock(size_t n_embd, size_t block_size, size_t D,
-                    const CudaTensor<float>& hadamard, RNG& rng)
+                    const CudaTensor<float> &hadamard, RNG &rng)
             : ln_1(n_embd, 1e-5f, rng), ln_2(n_embd, 1e-5f, rng),
               attn_q(n_embd, n_embd, rng), attn_k(n_embd, n_embd, rng),
               attn_v(n_embd, n_embd, rng), attn_proj(n_embd, n_embd, rng),
               mlp_fc(n_embd, 4 * n_embd, rng), mlp_proj(4 * n_embd, n_embd, rng),
               H_ptr(&hadamard) {}
 
-        CudaTensor<float> forward(const CudaTensor<float>& x, size_t B, size_t S,
-                                   size_t E, size_t D) {
-            B_cur = B; S_cur = S; E_cur = E; D_cur = D;
+        CudaTensor<float> forward(const CudaTensor<float> &x, size_t B, size_t S,
+                                  size_t E, size_t D)
+        {
+            B_cur = B;
+            S_cur = S;
+            E_cur = E;
+            D_cur = D;
             size_t dim = B * S;
             resid1_cache = x;
 
@@ -140,8 +151,8 @@ public:
             K_cache = attn_k.forward(xn);
             V_cache = attn_v.forward(xn);
 
-            compute_phi_polynomial(Q_cache, D, E, Q_phi_cache, Q_norm_sq_plus1_cache);
-            compute_phi_polynomial(K_cache, D, E, K_phi_cache, K_norm_sq_plus1_cache);
+            compute_phi_elu(Q_cache, D, E, Q_phi_cache);
+            compute_phi_elu(K_cache, D, E, K_phi_cache);
 
             S_buf = CudaTensor<float>({B * D, E});
             z_buf = CudaTensor<float>({B, D});
@@ -172,7 +183,8 @@ public:
             return x2;
         }
 
-        CudaTensor<float> backward(const CudaTensor<float>& dout) {
+        CudaTensor<float> backward(const CudaTensor<float> &dout)
+        {
             size_t B = B_cur, S = S_cur, E = E_cur, D = D_cur;
             size_t dim = B * S;
 
@@ -209,9 +221,9 @@ public:
                 B, S, D, E);
 
             CudaTensor<float> dQ({dim, E});
-            backward_phi_polynomial(dQ_phi, Q_cache, Q_norm_sq_plus1_cache, D, E, dQ);
+            backward_phi_elu(dQ_phi, Q_cache, D, E, dQ);
             CudaTensor<float> dK({dim, E});
-            backward_phi_polynomial(dK_phi, K_cache, K_norm_sq_plus1_cache, D, E, dK);
+            backward_phi_elu(dK_phi, K_cache, D, E, dK);
 
             auto dx_q = attn_q.backward(dQ);
             auto dx_k = attn_k.backward(dK);
@@ -227,23 +239,37 @@ public:
             return d_x;
         }
 
-        void zero_grad() {
-            ln_1.zero_grad(); ln_2.zero_grad();
-            attn_q.zero_grad(); attn_k.zero_grad(); attn_v.zero_grad();
+        void zero_grad()
+        {
+            ln_1.zero_grad();
+            ln_2.zero_grad();
+            attn_q.zero_grad();
+            attn_k.zero_grad();
+            attn_v.zero_grad();
             attn_proj.zero_grad();
-            mlp_fc.zero_grad(); mlp_proj.zero_grad();
+            mlp_fc.zero_grad();
+            mlp_proj.zero_grad();
         }
 
-        std::vector<Param*> parameters() {
-            std::vector<Param*> ps;
-            for (auto* p : ln_1.parameters())  ps.push_back(p);
-            for (auto* p : ln_2.parameters())  ps.push_back(p);
-            for (auto* p : attn_q.parameters())  ps.push_back(p);
-            for (auto* p : attn_k.parameters())  ps.push_back(p);
-            for (auto* p : attn_v.parameters())  ps.push_back(p);
-            for (auto* p : attn_proj.parameters())  ps.push_back(p);
-            for (auto* p : mlp_fc.parameters())  ps.push_back(p);
-            for (auto* p : mlp_proj.parameters())  ps.push_back(p);
+        std::vector<Param *> parameters()
+        {
+            std::vector<Param *> ps;
+            for (auto *p : ln_1.parameters())
+                ps.push_back(p);
+            for (auto *p : ln_2.parameters())
+                ps.push_back(p);
+            for (auto *p : attn_q.parameters())
+                ps.push_back(p);
+            for (auto *p : attn_k.parameters())
+                ps.push_back(p);
+            for (auto *p : attn_v.parameters())
+                ps.push_back(p);
+            for (auto *p : attn_proj.parameters())
+                ps.push_back(p);
+            for (auto *p : mlp_fc.parameters())
+                ps.push_back(p);
+            for (auto *p : mlp_proj.parameters())
+                ps.push_back(p);
             return ps;
         }
     };
@@ -255,7 +281,7 @@ public:
     std::vector<int> final_idx_cache;
     size_t B_fwd, S_fwd;
 
-    LinearGPT(LinearGPTConfig config, RNG& rng)
+    LinearGPT(LinearGPTConfig config, RNG &rng)
         : cfg(config),
           D(next_power_of_2(config.n_embd)),
           wte(config.vocab_size, config.n_embd, rng),
@@ -270,8 +296,10 @@ public:
             blocks.emplace_back(cfg.n_embd, cfg.block_size, D, H, rng);
     }
 
-    CudaTensor<float> forward(const std::vector<int>& idx, size_t B, size_t S) {
-        B_fwd = B; S_fwd = S;
+    CudaTensor<float> forward(const std::vector<int> &idx, size_t B, size_t S)
+    {
+        B_fwd = B;
+        S_fwd = S;
         final_idx_cache = idx;
 
         auto tok_emb = wte.forward(idx);
@@ -284,7 +312,7 @@ public:
         size_t dim = B * S;
         CudaTensor<float> x({dim, cfg.n_embd});
         TensorN::cuda::add(tok_emb, pos_emb, x);
-        for (auto& blk : blocks)
+        for (auto &blk : blocks)
             x = blk.forward(x, B, S, cfg.n_embd, D);
 
         final_x_cache = x;
@@ -292,7 +320,8 @@ public:
         return lm_head.forward(xn);
     }
 
-    void backward(const CudaTensor<float>& dlogits) {
+    void backward(const CudaTensor<float> &dlogits)
+    {
         auto d_xn = lm_head.backward(dlogits);
         auto d_x = ln_f.backward(d_xn);
 
@@ -307,21 +336,27 @@ public:
         wte.backward(d_x, final_idx_cache);
     }
 
-    void zero_grad() {
-        wte.zero_grad(); wpe.zero_grad(); ln_f.zero_grad();
+    void zero_grad()
+    {
+        wte.zero_grad();
+        wpe.zero_grad();
+        ln_f.zero_grad();
         lm_head.zero_grad();
-        for (auto& blk : blocks) blk.zero_grad();
+        for (auto &blk : blocks)
+            blk.zero_grad();
     }
 
-    std::vector<std::pair<std::string, Param*>> named_parameters() {
-        std::vector<std::pair<std::string, Param*>> np;
+    std::vector<std::pair<std::string, Param *>> named_parameters()
+    {
+        std::vector<std::pair<std::string, Param *>> np;
         np.push_back({"wte.weight", &wte.weight});
         np.push_back({"wpe.weight", &wpe.weight});
         np.push_back({"ln_f.gamma", &ln_f.gamma});
         np.push_back({"ln_f.beta", &ln_f.beta});
         np.push_back({"lm_head.W", &lm_head.W});
         np.push_back({"lm_head.b", &lm_head.b});
-        for (size_t i = 0; i < blocks.size(); i++) {
+        for (size_t i = 0; i < blocks.size(); i++)
+        {
             std::string prefix = "blocks." + std::to_string(i) + ".";
             np.push_back({prefix + "ln_1.gamma", &blocks[i].ln_1.gamma});
             np.push_back({prefix + "ln_1.beta", &blocks[i].ln_1.beta});
@@ -343,24 +378,32 @@ public:
         return np;
     }
 
-    std::vector<Param*> parameters() {
-        std::vector<Param*> ps;
-        for (auto* p : wte.parameters()) ps.push_back(p);
-        for (auto* p : wpe.parameters()) ps.push_back(p);
-        for (auto* p : ln_f.parameters()) ps.push_back(p);
-        for (auto* p : lm_head.parameters()) ps.push_back(p);
-        for (auto& blk : blocks)
-            for (auto* p : blk.parameters()) ps.push_back(p);
+    std::vector<Param *> parameters()
+    {
+        std::vector<Param *> ps;
+        for (auto *p : wte.parameters())
+            ps.push_back(p);
+        for (auto *p : wpe.parameters())
+            ps.push_back(p);
+        for (auto *p : ln_f.parameters())
+            ps.push_back(p);
+        for (auto *p : lm_head.parameters())
+            ps.push_back(p);
+        for (auto &blk : blocks)
+            for (auto *p : blk.parameters())
+                ps.push_back(p);
         return ps;
     }
 
-    size_t total_params() const {
+    size_t total_params() const
+    {
         size_t n = 0;
         n += wte.weight.numel();
         n += wpe.weight.numel();
         n += ln_f.gamma.numel() + ln_f.beta.numel();
         n += lm_head.W.numel() + lm_head.b.numel();
-        for (auto& blk : blocks) {
+        for (auto &blk : blocks)
+        {
             n += blk.ln_1.gamma.numel() + blk.ln_1.beta.numel();
             n += blk.ln_2.gamma.numel() + blk.ln_2.beta.numel();
             n += blk.attn_q.W.numel() + blk.attn_q.b.numel();
@@ -373,15 +416,18 @@ public:
         return n;
     }
 
-    void save(const std::string& path) const {
+    void save(const std::string &path) const
+    {
         std::string gguf_path = path;
-        if (gguf_path.size() < 5 || gguf_path.substr(gguf_path.size() - 5) != ".gguf") {
+        if (gguf_path.size() < 5 || gguf_path.substr(gguf_path.size() - 5) != ".gguf")
+        {
             gguf_path += ".gguf";
         }
 
         std::vector<std::pair<std::string, Tensor<float>>> tensors;
-        auto named = const_cast<LinearGPT*>(this)->named_parameters();
-        for (auto& [name, param] : named) {
+        auto named = const_cast<LinearGPT *>(this)->named_parameters();
+        for (auto &[name, param] : named)
+        {
             tensors.push_back({name, param->data.toTensor()});
         }
 
@@ -398,13 +444,16 @@ public:
         std::cout << "Model saved to " << gguf_path << " (" << tensors.size() << " tensors)" << std::endl;
     }
 
-    static LinearGPTConfig load_config(const std::string& path) {
+    static LinearGPTConfig load_config(const std::string &path)
+    {
         auto meta = gguf_read_metadata(path);
         LinearGPTConfig cfg;
 
-        auto get_u64 = [&](const std::string& key, size_t& target) {
+        auto get_u64 = [&](const std::string &key, size_t &target)
+        {
             auto it = meta.find(key);
-            if (it != meta.end()) {
+            if (it != meta.end())
+            {
                 if (std::holds_alternative<uint64_t>(it->second))
                     target = (size_t)std::get<uint64_t>(it->second);
                 else if (std::holds_alternative<int64_t>(it->second))
@@ -424,13 +473,16 @@ public:
         return cfg;
     }
 
-    void load(const std::string& path) {
+    void load(const std::string &path)
+    {
         auto meta = gguf_read_metadata(path);
 
         auto it_arch = meta.find("general.architecture");
-        if (it_arch != meta.end() && std::holds_alternative<std::string>(it_arch->second)) {
+        if (it_arch != meta.end() && std::holds_alternative<std::string>(it_arch->second))
+        {
             std::string arch = std::get<std::string>(it_arch->second);
-            if (arch != "cxxlinear") {
+            if (arch != "cxxlinear")
+            {
                 std::cerr << "Warning: model architecture is '" << arch << "', expected 'cxxlinear'" << std::endl;
             }
         }
@@ -439,11 +491,15 @@ public:
         auto named = named_parameters();
 
         size_t loaded = 0;
-        for (auto& [name, param] : named) {
-            if (tensors.count(name)) {
+        for (auto &[name, param] : named)
+        {
+            if (tensors.count(name))
+            {
                 param->data = CudaTensor<float>::fromTensor(tensors[name]);
                 loaded++;
-            } else {
+            }
+            else
+            {
                 std::cerr << "Warning: missing tensor '" << name << "'" << std::endl;
             }
         }
@@ -451,11 +507,13 @@ public:
         std::cout << "Model loaded from " << path << " (" << loaded << " tensors)" << std::endl;
     }
 
-    std::vector<int> generate(const std::vector<int>& prompt, size_t max_new_tokens,
-                               int eos_id, float temperature, int top_k, RNG& rng) {
+    std::vector<int> generate(const std::vector<int> &prompt, size_t max_new_tokens,
+                              int eos_id, float temperature, int top_k, RNG &rng)
+    {
         std::vector<int> ids = prompt;
 
-        for (size_t step = 0; step < max_new_tokens; step++) {
+        for (size_t step = 0; step < max_new_tokens; step++)
+        {
             size_t context_len = std::min(ids.size(), cfg.block_size);
             size_t offset = ids.size() - context_len;
 
@@ -472,7 +530,7 @@ public:
             CudaTensor<float> hid({context_len, cfg.n_embd});
             TensorN::cuda::add(tok_emb, pos_emb, hid);
 
-            for (auto& blk : blocks)
+            for (auto &blk : blocks)
                 hid = blk.forward(hid, 1, context_len, cfg.n_embd, D);
 
             auto xn = ln_f.forward(hid);
@@ -484,30 +542,44 @@ public:
             std::vector<std::pair<float, int>> top_v;
             top_v.reserve(cfg.vocab_size);
             float max_logit = -1e30f;
-            for (size_t v = 0; v < cfg.vocab_size; v++) {
+            for (size_t v = 0; v < cfg.vocab_size; v++)
+            {
                 float val = logits_cpu[last_row + v];
-                if (temperature > 0.01f) val /= temperature;
-                if (val > max_logit) max_logit = val;
+                if (temperature > 0.01f)
+                    val /= temperature;
+                if (val > max_logit)
+                    max_logit = val;
                 top_v.push_back({val, (int)v});
             }
 
-            if (top_k > 0 && top_k < (int)top_v.size()) {
+            if (top_k > 0 && top_k < (int)top_v.size())
+            {
                 std::partial_sort(top_v.begin(), top_v.begin() + top_k, top_v.end(),
-                    [](const auto& a, const auto& b) { return a.first > b.first; });
+                                  [](const auto &a, const auto &b)
+                                  { return a.first > b.first; });
                 top_v.resize(top_k);
             }
 
             int next_token;
-            if (temperature < 0.01f) {
+            if (temperature < 0.01f)
+            {
                 float best = -1e30f;
                 int best_id = 0;
-                for (auto& p : top_v) {
-                    if (p.first > best) { best = p.first; best_id = p.second; }
+                for (auto &p : top_v)
+                {
+                    if (p.first > best)
+                    {
+                        best = p.first;
+                        best_id = p.second;
+                    }
                 }
                 next_token = best_id;
-            } else {
+            }
+            else
+            {
                 float sum_exp = 0.0f;
-                for (auto& p : top_v) {
+                for (auto &p : top_v)
+                {
                     float exp_val = std::exp(p.first - max_logit);
                     p.first = exp_val;
                     sum_exp += exp_val;
@@ -515,14 +587,20 @@ public:
                 float r = (float)rng.randint(0, 1000000) / 1000000.0f;
                 float cum = 0.0f;
                 int chosen = top_v[0].second;
-                for (auto& p : top_v) {
+                for (auto &p : top_v)
+                {
                     cum += p.first / sum_exp;
-                    if (r <= cum) { chosen = p.second; break; }
+                    if (r <= cum)
+                    {
+                        chosen = p.second;
+                        break;
+                    }
                 }
                 next_token = chosen;
             }
 
-            if (next_token == eos_id) break;
+            if (next_token == eos_id)
+                break;
             ids.push_back(next_token);
         }
 
@@ -530,9 +608,9 @@ public:
     }
 };
 
-inline void linear_numerical_grad_check(LinearGPT& model,
-    const std::vector<int>& x, const std::vector<int>& y,
-    size_t batch_size, size_t block_size)
+inline void linear_numerical_grad_check(LinearGPT &model,
+                                        const std::vector<int> &x, const std::vector<int> &y,
+                                        size_t batch_size, size_t block_size)
 {
     auto params = model.parameters();
     auto logits = model.forward(x, batch_size, block_size);
@@ -546,15 +624,17 @@ inline void linear_numerical_grad_check(LinearGPT& model,
     float eps = 1e-3f;
     int check_count = std::min((int)params.size(), 5);
 
-    for (int idx = 0; idx < check_count; idx++) {
-        auto* p = params[idx];
+    for (int idx = 0; idx < check_count; idx++)
+    {
+        auto *p = params[idx];
         size_t n = p->data.size();
         int check_elems = std::min((int)n, 3);
 
         Tensor<float> cpu_data = p->data.toTensor();
         Tensor<float> cpu_grad = p->grad.toTensor();
 
-        for (int e = 0; e < check_elems; e++) {
+        for (int e = 0; e < check_elems; e++)
+        {
             float old_val = cpu_data[e];
 
             cpu_data[e] = old_val + eps;
@@ -582,7 +662,8 @@ inline void linear_numerical_grad_check(LinearGPT& model,
                       << (rel_err < 1e-3f ? " OK" : " MISMATCH") << std::endl;
         }
     }
-    std::cout << "================================\n" << std::endl;
+    std::cout << "================================\n"
+              << std::endl;
 }
 
 #endif

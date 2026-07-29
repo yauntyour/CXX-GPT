@@ -29,8 +29,8 @@ extern "C" void sigint_handler(int) {
 }
 #endif
 
-static constexpr const char* CHECKPOINT_FILE = "gpt_checkpoint.gguf";
-static constexpr const char* MODEL_FILE = "gpt_model.gguf";
+static constexpr const char* CHECKPOINT_FILE = "models/gpt_checkpoint.gguf";
+static constexpr const char* MODEL_FILE = "models/gpt_model.gguf";
 
 void save_checkpoint(const GPT& model, const AdamW& optim, int step) {
     std::cout << "\nSaving checkpoint at step " << step << "..." << std::endl;

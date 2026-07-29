@@ -29,8 +29,8 @@ extern "C" void sigint_handler(int) {
 }
 #endif
 
-static constexpr const char* CHECKPOINT_FILE = "linear_checkpoint.gguf";
-static constexpr const char* MODEL_FILE = "linear_model.gguf";
+static constexpr const char* CHECKPOINT_FILE = "models/linear_checkpoint.gguf";
+static constexpr const char* MODEL_FILE = "models/linear_model.gguf";
 
 void save_checkpoint(const LinearGPT& model, const AdamW& optim, int step) {
     std::cout << "\nSaving checkpoint at step " << step << "..." << std::endl;
@@ -179,7 +179,7 @@ int main()
     signal(SIGINT, sigint_handler);
 #endif
 
-    std::cout << "\n=== Training LinearGPT (Hadamard+Exp Kernel) ===" << std::endl;
+    std::cout << "\n=== Training LinearGPT (ELU Kernel) ===" << std::endl;
     std::cout << std::fixed << std::setprecision(4);
 
     auto start_time = std::chrono::high_resolution_clock::now();

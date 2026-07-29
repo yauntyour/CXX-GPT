@@ -298,133 +298,81 @@ void causal_linear_attention_bwd_dKdV(
 }
 
 // ============================================================
-// phi_polynomial forward: fused computation of phi and norm_sq_plus1
-// phi[n, 0] = norm_sq_plus1[n] = 1 + sum(x[n, :]^2)
-// phi[n, k] = norm_sq_plus1[n] * x[n, k-1] for k = 1..E-1
-// phi[n, k] = 0 for k = E..D-1
+// phi_elu forward: phi(x) = ELU(x) + 1,  where ELU(x) = x if x > 0 else exp(x) - 1
+// phi[n, d] = ELU(x[n, d]) + 1 for d < E
+// phi[n, d] = 0 for d >= E
 // ============================================================
-__global__ void phi_polynomial_fwd_kernel(
+__global__ void phi_elu_fwd_kernel(
     const float* __restrict__ x,
     float* __restrict__ phi,
-    float* __restrict__ norm_sq_plus1,
     size_t N, size_t D, size_t E)
 {
     size_t i = blockIdx.x;
     if (i >= N) return;
 
-    size_t tid = threadIdx.x;
     size_t x_offset = i * E;
     size_t phi_offset = i * D;
 
-    float sum_sq = 0.0f;
-    for (size_t j = tid; j < E; j += blockDim.x) {
-        float xv = x[x_offset + j];
-        sum_sq += xv * xv;
-    }
-
-    extern __shared__ float shared[];
-    shared[tid] = sum_sq;
-    __syncthreads();
-    for (size_t s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (tid < s) shared[tid] += shared[tid + s];
-        __syncthreads();
-    }
-
-    float nsp = shared[0] + 1.0f;
-    __syncthreads();
-
-    if (tid == 0) {
-        norm_sq_plus1[i] = nsp;
-    }
-
-    for (size_t j = tid; j < D; j += blockDim.x) {
-        if (j == 0) {
-            phi[phi_offset] = nsp;
-        } else if (j < E) {
-            phi[phi_offset + j] = nsp * x[x_offset + j - 1];
+    for (size_t j = threadIdx.x; j < D; j += blockDim.x) {
+        if (j < E) {
+            float xv = x[x_offset + j];
+            float elu = xv > 0.0f ? xv : expf(xv) - 1.0f;
+            phi[phi_offset + j] = elu + 1.0f;
         } else {
             phi[phi_offset + j] = 0.0f;
         }
     }
 }
 
-void phi_polynomial_forward(
+void phi_elu_forward(
     const CudaTensor<float>& x,
     CudaTensor<float>& phi,
-    CudaTensor<float>& norm_sq_plus1,
     size_t D, size_t E)
 {
     size_t N = x.shape()[0];
-    size_t block_threads = (size_t)min(E, (size_t)LBLOCK_SIZE);
+    size_t block_threads = (size_t)min(D, (size_t)LBLOCK_SIZE);
     dim3 grid((unsigned int)N);
     dim3 block((unsigned int)block_threads);
-    size_t shared_mem = block_threads * sizeof(float);
-    phi_polynomial_fwd_kernel<<<grid, block, shared_mem>>>(
-        x.device_ptr(), phi.device_ptr(), norm_sq_plus1.device_ptr(),
+    phi_elu_fwd_kernel<<<grid, block>>>(
+        x.device_ptr(), phi.device_ptr(),
         N, D, E);
     CHECK_CUDA_ERROR(cudaGetLastError());
 }
 
 // ============================================================
-// phi_polynomial backward: d(norm_sq_plus1 * x) / dx
-// S = dphi[0] + sum_{k=1}^{E-1} dphi[k] * x[k-1]
-// dx[j] = 2 * x[j] * S + (j+1 < E ? dphi[j+1] * norm_sq_plus1 : 0)
+// phi_elu backward: d(ELU(x) + 1) / dx
+// derivative = 1 if x > 0, else exp(x)
+// dx[n, d] = dphi[n, d] * derivative
 // ============================================================
-__global__ void phi_polynomial_bwd_kernel(
+__global__ void phi_elu_bwd_kernel(
     const float* __restrict__ dphi,
     const float* __restrict__ x,
-    const float* __restrict__ norm_sq_plus1,
     float* __restrict__ dx,
     size_t N, size_t D, size_t E)
 {
     size_t i = blockIdx.x;
     if (i >= N) return;
 
-    extern __shared__ float shared[];
-
     size_t dphi_offset = i * D;
     size_t x_offset = i * E;
-    float nsp = norm_sq_plus1[i];
 
-    float sum = 0.0f;
-    int idx = (int)threadIdx.x;
-    if (idx == 0) {
-        sum = dphi[dphi_offset];
-    }
-    if (idx < (int)E - 1) {
-        sum += dphi[dphi_offset + idx + 1] * x[x_offset + idx];
-    }
-
-    shared[idx] = sum;
-    __syncthreads();
-    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (idx < s) shared[idx] += shared[idx + s];
-        __syncthreads();
-    }
-    float S = shared[0];
-    __syncthreads();
-
-    for (size_t j = (size_t)idx; j < E; j += blockDim.x) {
-        float val = 2.0f * x[x_offset + j] * S;
-        if (j + 1 < E) {
-            val += dphi[dphi_offset + j + 1] * nsp;
-        }
-        dx[i * E + j] = val;
+    for (size_t j = threadIdx.x; j < E; j += blockDim.x) {
+        float xv = x[x_offset + j];
+        float derivative = xv > 0.0f ? 1.0f : expf(xv);
+        dx[i * E + j] = dphi[dphi_offset + j] * derivative;
     }
 }
 
-void phi_polynomial_backward(
+void phi_elu_backward(
     const CudaTensor<float>& dphi, const CudaTensor<float>& x,
-    const CudaTensor<float>& norm_sq_plus1,
     CudaTensor<float>& dx, size_t D, size_t E)
 {
     size_t N = dphi.shape()[0];
     size_t block_threads = (size_t)min(E, (size_t)LBLOCK_SIZE);
     dim3 grid((unsigned int)N);
     dim3 block((unsigned int)block_threads);
-    size_t shared_mem = block_threads * sizeof(float);
-    phi_polynomial_bwd_kernel<<<grid, block, shared_mem>>>(
-        dphi.device_ptr(), x.device_ptr(), norm_sq_plus1.device_ptr(),
+    phi_elu_bwd_kernel<<<grid, block>>>(
+        dphi.device_ptr(), x.device_ptr(),
         dx.device_ptr(), N, D, E);
     CHECK_CUDA_ERROR(cudaGetLastError());
 }

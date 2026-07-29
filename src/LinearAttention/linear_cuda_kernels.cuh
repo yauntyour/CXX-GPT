@@ -36,15 +36,13 @@ void causal_linear_attention_bwd_dKdV(
     CudaTensor<float>& dK_phi, CudaTensor<float>& dV,
     size_t B, size_t S, size_t D, size_t E);
 
-void phi_polynomial_forward(
+void phi_elu_forward(
     const CudaTensor<float>& x,
     CudaTensor<float>& phi,
-    CudaTensor<float>& norm_sq_plus1,
     size_t D, size_t E);
 
-void phi_polynomial_backward(
+void phi_elu_backward(
     const CudaTensor<float>& dphi, const CudaTensor<float>& x,
-    const CudaTensor<float>& norm_sq_plus1,
     CudaTensor<float>& dx, size_t D, size_t E);
 
 } // namespace linear_cuda

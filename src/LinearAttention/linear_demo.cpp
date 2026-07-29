@@ -26,7 +26,7 @@ int main()
         }
         std::cout << "Vocabulary size: " << tokenizer.vocab_size() << std::endl;
 
-        LinearGPTConfig cfg = LinearGPT::load_config("linear_model.gguf");
+        LinearGPTConfig cfg = LinearGPT::load_config("models/linear_model.gguf");
         std::cout << "Model config: n_embd=" << cfg.n_embd
                   << " n_layer=" << cfg.n_layer
                   << " block_size=" << cfg.block_size << std::endl;
@@ -35,11 +35,11 @@ int main()
         LinearGPT model(cfg, rng);
         std::cout << "Model parameters: " << model.total_params() << std::endl;
 
-        model.load("linear_model.gguf");
+        model.load("models/linear_model.gguf");
 
         int eos_id = tokenizer.get_eos_id();
 
-        std::cout << "\n=== Interactive Chat (LinearGPT, Hadamard+Exp Kernel) ===" << std::endl;
+        std::cout << "\n=== Interactive Chat (LinearGPT, ELU Kernel) ===" << std::endl;
         std::cout << "Type 'quit' or 'exit' to stop.\n"
                   << std::endl;
 

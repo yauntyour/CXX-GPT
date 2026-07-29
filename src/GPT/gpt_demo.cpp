@@ -26,7 +26,7 @@ int main()
         }
         std::cout << "Vocabulary size: " << tokenizer.vocab_size() << std::endl;
 
-        GPTConfig cfg = GPT::load_config("gpt_model.gguf");
+        GPTConfig cfg = GPT::load_config("models/gpt_model.gguf");
         std::cout << "Model config: n_embd=" << cfg.n_embd
                   << " n_layer=" << cfg.n_layer
                   << " block_size=" << cfg.block_size << std::endl;
@@ -35,7 +35,7 @@ int main()
         GPT model(cfg, rng);
         std::cout << "Model parameters: " << model.total_params() << std::endl;
 
-        model.load("gpt_model.gguf");
+        model.load("models/gpt_model.gguf");
 
         int eos_id = tokenizer.get_eos_id();
         int bos_id = tokenizer.get_bos_id();
