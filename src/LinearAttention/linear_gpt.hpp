@@ -21,29 +21,6 @@ static size_t next_power_of_2(size_t n)
     return n + 1;
 }
 
-static Tensor<float> generate_hadamard_submatrix(size_t D, size_t E)
-{
-    std::vector<float> full(D * D, 0.0f);
-    full[0] = 1.0f;
-    for (size_t k = 1; k < D; k *= 2)
-    {
-        for (size_t i = 0; i < k; i++)
-        {
-            for (size_t j = 0; j < k; j++)
-            {
-                full[i * D + j + k] = full[i * D + j];
-                full[(i + k) * D + j] = full[i * D + j];
-                full[(i + k) * D + j + k] = -full[i * D + j];
-            }
-        }
-    }
-    Tensor<float> H_sub({D, E});
-    for (size_t d = 0; d < D; d++)
-        for (size_t e = 0; e < E; e++)
-            H_sub[d * E + e] = full[d * D + e];
-    return H_sub;
-}
-
 struct LinearGPTConfig
 {
     size_t vocab_size = 4096;
@@ -52,21 +29,6 @@ struct LinearGPTConfig
     size_t n_layer = 4;
     float ln_eps = 1e-5f;
 };
-
-inline CudaTensor<float> compute_phi(const CudaTensor<float> &x,
-                                     const CudaTensor<float> &H, size_t D, size_t E)
-{
-    size_t N = x.shape()[0];
-    float inv_sqrt_E = 1.0f / std::sqrt((float)E);
-    CudaTensor<float> Ht({E, D});
-    TensorN::cuda::transpose(H, Ht);
-    CudaTensor<float> raw({N, D});
-    TensorN::cuda::matmul(x, Ht, raw);
-    TensorN::cuda::multiply_scalar(raw, inv_sqrt_E, raw);
-    CudaTensor<float> phi({N, D});
-    TensorN::cuda::exp(raw, phi);
-    return phi;
-}
 
 inline void compute_phi_elu(const CudaTensor<float> &x, size_t D, size_t E,
                             CudaTensor<float> &phi)
@@ -83,25 +45,11 @@ inline void backward_phi_elu(const CudaTensor<float> &dphi,
     linear_cuda::phi_elu_backward(dphi, x, dx, D, E);
 }
 
-inline void backward_phi(const CudaTensor<float> &dphi,
-                         const CudaTensor<float> &phi, const CudaTensor<float> &H,
-                         size_t D, size_t E, CudaTensor<float> &dx)
-{
-    size_t N = dphi.shape()[0];
-    float inv_sqrt_E = 1.0f / std::sqrt((float)E);
-    CudaTensor<float> d_raw({N, D});
-    TensorN::cuda::multiply(dphi, phi, d_raw);
-    TensorN::cuda::matmul(d_raw, H, dx);
-    TensorN::cuda::multiply_scalar(dx, inv_sqrt_E, dx);
-}
-
 class LinearGPT
 {
 public:
     LinearGPTConfig cfg;
     size_t D;
-
-    CudaTensor<float> H;
 
     Embedding wte, wpe;
     CudaTensor<float> wpe_all;
@@ -124,15 +72,13 @@ public:
         CudaTensor<float> S_buf, z_buf;
 
         size_t B_cur, S_cur, E_cur, D_cur;
-        const CudaTensor<float> *H_ptr;
 
         LinearBlock(size_t n_embd, size_t block_size, size_t D,
-                    const CudaTensor<float> &hadamard, RNG &rng)
+                    RNG &rng)
             : ln_1(n_embd, 1e-5f, rng), ln_2(n_embd, 1e-5f, rng),
               attn_q(n_embd, n_embd, rng), attn_k(n_embd, n_embd, rng),
               attn_v(n_embd, n_embd, rng), attn_proj(n_embd, n_embd, rng),
-              mlp_fc(n_embd, 4 * n_embd, rng), mlp_proj(4 * n_embd, n_embd, rng),
-              H_ptr(&hadamard) {}
+              mlp_fc(n_embd, 4 * n_embd, rng), mlp_proj(4 * n_embd, n_embd, rng) {}
 
         CudaTensor<float> forward(const CudaTensor<float> &x, size_t B, size_t S,
                                   size_t E, size_t D)
@@ -289,11 +235,8 @@ public:
           ln_f(config.n_embd, config.ln_eps, rng),
           lm_head(config.n_embd, config.vocab_size, rng)
     {
-        auto H_cpu = generate_hadamard_submatrix(D, cfg.n_embd);
-        H = CudaTensor<float>::fromTensor(H_cpu);
-
         for (size_t i = 0; i < cfg.n_layer; i++)
-            blocks.emplace_back(cfg.n_embd, cfg.block_size, D, H, rng);
+            blocks.emplace_back(cfg.n_embd, cfg.block_size, D, rng);
     }
 
     CudaTensor<float> forward(const std::vector<int> &idx, size_t B, size_t S)
