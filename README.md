@@ -57,7 +57,7 @@ LinearGPT 的理论复杂度为 O(n)，Softmax 为 O(n²)，但当前序列长�
 - CMake 3.18+
 - Visual Studio 2022 (MSVC)
 - CUDA 12+（推荐，但非必需）
-- Python 3（用于数据集预编码）
+- Python 3（可选，用于检查预处理结果）
 
 ### 构建
 
@@ -140,11 +140,24 @@ CXX-GPT/
 
 ## 模型配置
 
-默认配置（约 280 万参数）：
+默认配置（约 9500 万参数，GPT-2 small 量级）：
 - `vocab_size`：6400
-- `block_size`：64
-- `n_embd`：128
-- `n_layer`：6
+- `block_size`：256
+- `n_embd`：768
+- `n_layer`：12
+- 参数量：95,089,408（GPT / LinearGPT 相同结构）
+- 批大小：8，训练 3 个 epoch（可用命令行覆盖：`gpt_train.exe [epochs] [batch_size]`）
+
+## 数据集预处理
+
+`dataset/pretrain_t2t_mini.jsonl`（1.2 GB）通过 C++ 预处理工具转换为二进制"大块"格式：
+
+```bash
+./build/bin/Release/preprocess_dataset.exe dataset/pretrain_t2t_mini.jsonl
+# 输出 dataset/pretrain_t2t_mini.bin
+```
+
+处理流程：逐行解析 JSONL → BPE 编码 → 每篇文档首尾显式添加 BOS/EOS → 全部合并为单个扁平 token 块（uint16，882 MB，约 4.6 亿 token）。训练时 `Dataset::next_batch` 直接从块中连续切片，无需任何 JSON 解析/在线分词，大幅提升 batch 吞吐。
 
 ## 许可
 

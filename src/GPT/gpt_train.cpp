@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <clocale>
 #include <csignal>
+#include <cstdlib>
 #include <atomic>
 #include <filesystem>
 #ifdef _WIN32
@@ -98,7 +99,7 @@ bool load_checkpoint(GPT& model, AdamW& optim, int& step) {
     }
 }
 
-int main()
+int main(int argc, char** argv)
 {
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
@@ -116,31 +117,34 @@ int main()
     }
     std::cout << "Vocabulary size: " << tokenizer.vocab_size() << std::endl;
 
-    Dataset train_ds, val_ds;
+    Dataset train_ds;
 
     std::cout << "Loading dataset..." << std::endl;
-    if (!train_ds.load_jsonl("dataset/train.jsonl", tokenizer))
+    // Prefer the preprocessed binary "big block" (BOS/EOS wrapped, flat).
+    if (!train_ds.load_bin("dataset/pretrain_t2t_mini.bin"))
     {
-        std::cerr << "Failed to load training data!" << std::endl;
-        return 1;
+        if (!train_ds.load_jsonl("dataset/pretrain_t2t_mini.jsonl", tokenizer))
+        {
+            std::cerr << "Failed to load training data!" << std::endl;
+            return 1;
+        }
     }
-    val_ds.load_jsonl("dataset/val.jsonl", tokenizer);
 
     std::cout << "Train: " << train_ds.num_docs() << " docs, "
               << train_ds.num_tokens() << " tokens" << std::endl;
 
     GPTConfig cfg;
     cfg.vocab_size = tokenizer.vocab_size();
-    cfg.block_size = 64;
-    cfg.n_embd = 128;
-    cfg.n_layer = 6;
+    cfg.block_size = 256;
+    cfg.n_embd = 768;
+    cfg.n_layer = 12;
 
     RNG rng(42);
     GPT model(cfg, rng);
     std::cout << "Model parameters: " << model.total_params() << std::endl;
 
     auto params = model.parameters();
-    AdamW optim(params, 1e-3f, 0.9f, 0.999f, 0.01f);
+    AdamW optim(params, 3e-4f, 0.9f, 0.999f, 0.01f);
 
     auto compute_grad_norm = [&params]() {
         float total = 0.0f;
@@ -150,9 +154,20 @@ int main()
     };
 
     size_t batch_size = 8;
-    int max_steps = 2769;
-    int eval_interval = 200;
+    int num_epochs = 3;
+    int eval_interval = 500;
     int eval_iters = 10;
+
+    size_t tokens_per_step = batch_size * cfg.block_size;
+    size_t steps_per_epoch = train_ds.num_tokens() / tokens_per_step;
+    int max_steps = num_epochs * (int)steps_per_epoch;
+
+    // Optional CLI overrides: gpt_train.exe [epochs] [batch_size]
+    if (argc >= 2) num_epochs = std::atoi(argv[1]);
+    if (argc >= 3) batch_size = (size_t)(std::max)(1, std::atoi(argv[2]));
+    if (argc >= 2) max_steps = num_epochs * (int)(train_ds.num_tokens() / (batch_size * cfg.block_size));
+    std::cout << "Epochs=" << num_epochs << " steps=" << max_steps
+              << " batch_size=" << batch_size << std::endl;
 
     int start_step = 0;
 
@@ -194,15 +209,12 @@ int main()
             float grad_norm = compute_grad_norm();
             float train_loss = estimate_loss(model, train_ds,
                                              batch_size, cfg.block_size, rng, eval_iters);
-            float val_loss = estimate_loss(model, val_ds,
-                                           batch_size, cfg.block_size, rng, eval_iters);
 
             auto now = std::chrono::high_resolution_clock::now();
             auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start_time).count();
 
             std::cout << "step " << std::setw(4) << step
                       << " | train loss " << train_loss
-                      << " | val loss " << val_loss
                       << " | grad_norm " << grad_norm
                       << " | time " << elapsed << "s" << std::endl;
 

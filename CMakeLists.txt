@@ -9,6 +9,12 @@ set(TENSORN_BUILD_EXAMPLES OFF)
 set(TENSORN_BUILD_BENCHMARKS OFF)
 add_subdirectory(TensorN)
 
+# Dataset preprocessor: JSONL -> binary "big block" (BOS/EOS wrapped, flat).
+# CPU-only; requires only nlohmann/json (provided by TensorN).
+add_executable(preprocess_dataset src/tools/preprocess_dataset.cpp)
+target_include_directories(preprocess_dataset PRIVATE src)
+target_link_libraries(preprocess_dataset PRIVATE nlohmann_json::nlohmann_json)
+
 # Original GPT model (softmax attention)
 add_executable(gpt_train src/GPT/gpt_train.cpp src/GPT/gpt_cuda_kernels.cu)
 target_include_directories(gpt_train PRIVATE src)
@@ -35,6 +41,6 @@ add_executable(linear_demo
 target_include_directories(linear_demo PRIVATE src)
 target_link_libraries(linear_demo PRIVATE TensorN)
 
-set_target_properties(gpt_train gpt_demo linear_train linear_demo PROPERTIES
+set_target_properties(gpt_train gpt_demo linear_train linear_demo preprocess_dataset PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )

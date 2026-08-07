@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <clocale>
 #include <csignal>
+#include <cstdlib>
 #include <atomic>
 #include <filesystem>
 #ifdef _WIN32
@@ -16,34 +17,40 @@
 static std::atomic<bool> g_interrupted{false};
 
 #ifdef _WIN32
-BOOL WINAPI console_ctrl_handler(DWORD ctrl_type) {
-    if (ctrl_type == CTRL_C_EVENT || ctrl_type == CTRL_BREAK_EVENT) {
+BOOL WINAPI console_ctrl_handler(DWORD ctrl_type)
+{
+    if (ctrl_type == CTRL_C_EVENT || ctrl_type == CTRL_BREAK_EVENT)
+    {
         g_interrupted = true;
         return TRUE;
     }
     return FALSE;
 }
 #else
-extern "C" void sigint_handler(int) {
+extern "C" void sigint_handler(int)
+{
     g_interrupted = true;
 }
 #endif
 
-static constexpr const char* CHECKPOINT_FILE = "models/linear_checkpoint.gguf";
-static constexpr const char* MODEL_FILE = "models/linear_model.gguf";
+static constexpr const char *CHECKPOINT_FILE = "models/linear_checkpoint.gguf";
+static constexpr const char *MODEL_FILE = "models/linear_model.gguf";
 
-void save_checkpoint(const LinearGPT& model, const AdamW& optim, int step) {
+void save_checkpoint(const LinearGPT &model, const AdamW &optim, int step)
+{
     std::cout << "\nSaving checkpoint at step " << step << "..." << std::endl;
 
     std::vector<std::pair<std::string, Tensor<float>>> tensors;
 
-    auto named = const_cast<LinearGPT&>(model).named_parameters();
-    for (auto& [name, param] : named) {
+    auto named = const_cast<LinearGPT &>(model).named_parameters();
+    for (auto &[name, param] : named)
+    {
         tensors.push_back({"model." + name, param->data.toTensor()});
     }
 
     auto opt_state = optim.named_state();
-    for (auto& [name, tensor] : opt_state) {
+    for (auto &[name, tensor] : opt_state)
+    {
         tensors.push_back({"optimizer." + name, tensor});
     }
 
@@ -59,32 +66,40 @@ void save_checkpoint(const LinearGPT& model, const AdamW& optim, int step) {
     std::cout << "Checkpoint saved to " << CHECKPOINT_FILE << std::endl;
 }
 
-bool load_checkpoint(LinearGPT& model, AdamW& optim, int& step) {
-    if (!std::filesystem::exists(CHECKPOINT_FILE)) {
+bool load_checkpoint(LinearGPT &model, AdamW &optim, int &step)
+{
+    if (!std::filesystem::exists(CHECKPOINT_FILE))
+    {
         return false;
     }
 
-    try {
+    try
+    {
         auto meta = gguf_read_metadata(CHECKPOINT_FILE);
 
         auto it_step = meta.find("checkpoint.step");
-        if (it_step != meta.end() && std::holds_alternative<int32_t>(it_step->second)) {
+        if (it_step != meta.end() && std::holds_alternative<int32_t>(it_step->second))
+        {
             step = std::get<int32_t>(it_step->second);
         }
 
         auto tensors = load_gguf_multi<float>(CHECKPOINT_FILE);
 
         auto named = model.named_parameters();
-        for (auto& [name, param] : named) {
+        for (auto &[name, param] : named)
+        {
             std::string key = "model." + name;
-            if (tensors.count(key)) {
+            if (tensors.count(key))
+            {
                 param->data = CudaTensor<float>::fromTensor(tensors[key]);
             }
         }
 
         std::unordered_map<std::string, Tensor<float>> opt_state;
-        for (auto& [key, tensor] : tensors) {
-            if (key.substr(0, 10) == "optimizer.") {
+        for (auto &[key, tensor] : tensors)
+        {
+            if (key.substr(0, 10) == "optimizer.")
+            {
                 opt_state[key.substr(10)] = tensor;
             }
         }
@@ -92,17 +107,20 @@ bool load_checkpoint(LinearGPT& model, AdamW& optim, int& step) {
 
         std::cout << "Loaded checkpoint from step " << step << std::endl;
         return true;
-    } catch (const std::exception& e) {
+    }
+    catch (const std::exception &e)
+    {
         std::cerr << "Failed to load checkpoint: " << e.what() << std::endl;
         return false;
     }
 }
 
-float estimate_loss_linear(LinearGPT& model, Dataset& ds,
-    size_t batch_size, size_t block_size, RNG& rng, int num_batches)
+float estimate_loss_linear(LinearGPT &model, Dataset &ds,
+                           size_t batch_size, size_t block_size, RNG &rng, int num_batches)
 {
     float total_loss = 0.0f;
-    for (int i = 0; i < num_batches; i++) {
+    for (int i = 0; i < num_batches; i++)
+    {
         auto [x, y] = ds.next_batch(batch_size, block_size);
         auto logits = model.forward(x, batch_size, block_size);
         auto [loss, dl] = cross_entropy_loss(logits, y);
@@ -111,7 +129,7 @@ float estimate_loss_linear(LinearGPT& model, Dataset& ds,
     return total_loss / num_batches;
 }
 
-int main()
+int main(int argc, char **argv)
 {
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
@@ -120,139 +138,156 @@ int main()
     std::setlocale(LC_ALL, "en_US.UTF-8");
     try
     {
-    std::cout << "Loading tokenizer..." << std::endl;
-    BPETokenizer tokenizer;
-    if (!tokenizer.load("tokenizer/tokenizer.json"))
-    {
-        std::cerr << "Failed to load tokenizer!" << std::endl;
-        return 1;
-    }
-    std::cout << "Vocabulary size: " << tokenizer.vocab_size() << std::endl;
-
-    Dataset train_ds, val_ds;
-
-    std::cout << "Loading dataset..." << std::endl;
-    if (!train_ds.load_jsonl("dataset/train.jsonl", tokenizer))
-    {
-        std::cerr << "Failed to load training data!" << std::endl;
-        return 1;
-    }
-    val_ds.load_jsonl("dataset/val.jsonl", tokenizer);
-
-    std::cout << "Train: " << train_ds.num_docs() << " docs, "
-              << train_ds.num_tokens() << " tokens" << std::endl;
-
-    LinearGPTConfig cfg;
-    cfg.vocab_size = tokenizer.vocab_size();
-    cfg.block_size = 64;
-    cfg.n_embd = 128;
-    cfg.n_layer = 6;
-
-    size_t D = next_power_of_2(cfg.n_embd);
-    std::cout << "Embedding dim: " << cfg.n_embd
-              << ", Feature dim (D): " << D << std::endl;
-
-    RNG rng(42);
-    LinearGPT model(cfg, rng);
-    std::cout << "Model parameters: " << model.total_params() << std::endl;
-
-    auto params = model.parameters();
-    AdamW optim(params, 1e-3f, 0.9f, 0.999f, 0.01f);
-
-    auto compute_grad_norm = [&params]() {
-        float total = 0.0f;
-        for (auto* p : params)
-            total += gpt_cuda::grad_norm_squared(p->grad);
-        return std::sqrt(total);
-    };
-
-    size_t batch_size = 8;
-    int max_steps = 2769;
-    int eval_interval = 200;
-    int eval_iters = 10;
-
-    int start_step = 0;
-
-#ifdef _WIN32
-    SetConsoleCtrlHandler(console_ctrl_handler, TRUE);
-#else
-    signal(SIGINT, sigint_handler);
-#endif
-
-    std::cout << "\n=== Training LinearGPT (ELU Kernel) ===" << std::endl;
-    std::cout << std::fixed << std::setprecision(4);
-
-    auto start_time = std::chrono::high_resolution_clock::now();
-
-    for (int step = start_step; step < max_steps; step++)
-    {
-        if (g_interrupted) {
-            std::cout << "\n\nUser interrupted! Saving checkpoint..." << std::endl;
-            save_checkpoint(model, optim, step);
-            std::cout << "Checkpoint saved. You can resume later with the same command." << std::endl;
-            return 0;
-        }
-
-        auto [x, y] = train_ds.next_batch(batch_size, cfg.block_size);
-
-        auto logits = model.forward(x, batch_size, cfg.block_size);
-        auto [loss, dlogits] = cross_entropy_loss(logits, y);
-
-        if (step == 0) {
-            std::cout << "Initial forward loss (raw): " << loss << std::endl;
-            linear_numerical_grad_check(model, x, y, batch_size, cfg.block_size);
-        }
-
-        model.zero_grad();
-        model.backward(dlogits);
-
-        if (step % eval_interval == 0 || step == max_steps - 1)
+        std::cout << "Loading tokenizer..." << std::endl;
+        BPETokenizer tokenizer;
+        if (!tokenizer.load("tokenizer/tokenizer.json"))
         {
-            float grad_norm = compute_grad_norm();
-            float train_loss = estimate_loss_linear(model, train_ds,
-                batch_size, cfg.block_size, rng, eval_iters);
-            float val_loss = estimate_loss_linear(model, val_ds,
-                batch_size, cfg.block_size, rng, eval_iters);
+            std::cerr << "Failed to load tokenizer!" << std::endl;
+            return 1;
+        }
+        std::cout << "Vocabulary size: " << tokenizer.vocab_size() << std::endl;
 
-            auto now = std::chrono::high_resolution_clock::now();
-            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start_time).count();
+        Dataset train_ds;
 
-            std::cout << "step " << std::setw(4) << step
-                      << " | train loss " << train_loss
-                      << " | val loss " << val_loss
-                      << " | grad_norm " << grad_norm
-                      << " | time " << elapsed << "s" << std::endl;
-
-            if (step > 0) {
-                save_checkpoint(model, optim, step);
+        std::cout << "Loading dataset..." << std::endl;
+        // Prefer the preprocessed binary "big block" (BOS/EOS wrapped, flat).
+        if (!train_ds.load_bin("dataset/pretrain_t2t_mini.bin"))
+        {
+            if (!train_ds.load_jsonl("dataset/pretrain_t2t_mini.jsonl", tokenizer))
+            {
+                std::cerr << "Failed to load training data!" << std::endl;
+                return 1;
             }
         }
 
-        optim.step();
+        std::cout << "Train: " << train_ds.num_docs() << " docs, "
+                  << train_ds.num_tokens() << " tokens" << std::endl;
+
+        LinearGPTConfig cfg;
+        cfg.vocab_size = tokenizer.vocab_size();
+        cfg.block_size = 256;
+        cfg.n_embd = 768;
+        cfg.n_layer = 12;
+
+        size_t D = next_power_of_2(cfg.n_embd);
+        std::cout << "Embedding dim: " << cfg.n_embd
+                  << ", Feature dim (D): " << D << std::endl;
+
+        RNG rng(42);
+        LinearGPT model(cfg, rng);
+        std::cout << "Model parameters: " << model.total_params() << std::endl;
+
+        auto params = model.parameters();
+        AdamW optim(params, 3e-4f, 0.9f, 0.999f, 0.01f);
+
+        auto compute_grad_norm = [&params]()
+        {
+            float total = 0.0f;
+            for (auto *p : params)
+                total += gpt_cuda::grad_norm_squared(p->grad);
+            return std::sqrt(total);
+        };
+
+        size_t batch_size = 8;
+        int num_epochs = 3;
+        int eval_interval = 500;
+        int eval_iters = 10;
+
+        size_t steps_per_epoch = train_ds.num_tokens() / (batch_size * cfg.block_size);
+        int max_steps = num_epochs * (int)steps_per_epoch;
+
+        // Optional CLI overrides: linear_train.exe [epochs] [batch_size]
+        if (argc >= 2)
+            num_epochs = std::atoi(argv[1]);
+        if (argc >= 3)
+            batch_size = (size_t)(std::max)(1, std::atoi(argv[2]));
+        if (argc >= 2)
+            max_steps = num_epochs * (int)(train_ds.num_tokens() / (batch_size * cfg.block_size));
+        std::cout << "Epochs=" << num_epochs << " steps=" << max_steps
+                  << " batch_size=" << batch_size << std::endl;
+
+        int start_step = 0;
+
+#ifdef _WIN32
+        SetConsoleCtrlHandler(console_ctrl_handler, TRUE);
+#else
+        signal(SIGINT, sigint_handler);
+#endif
+
+        std::cout << "\n=== Training LinearGPT (ELU Kernel) ===" << std::endl;
+        std::cout << std::fixed << std::setprecision(4);
+
+        auto start_time = std::chrono::high_resolution_clock::now();
+
+        for (int step = start_step; step < max_steps; step++)
+        {
+            if (g_interrupted)
+            {
+                std::cout << "\n\nUser interrupted! Saving checkpoint..." << std::endl;
+                save_checkpoint(model, optim, step);
+                std::cout << "Checkpoint saved. You can resume later with the same command." << std::endl;
+                return 0;
+            }
+
+            auto [x, y] = train_ds.next_batch(batch_size, cfg.block_size);
+
+            auto logits = model.forward(x, batch_size, cfg.block_size);
+            auto [loss, dlogits] = cross_entropy_loss(logits, y);
+
+            if (step == 0)
+            {
+                std::cout << "Initial forward loss (raw): " << loss << std::endl;
+                linear_numerical_grad_check(model, x, y, batch_size, cfg.block_size);
+            }
+
+            model.zero_grad();
+            model.backward(dlogits);
+
+            if (step % eval_interval == 0 || step == max_steps - 1)
+            {
+                float grad_norm = compute_grad_norm();
+                float train_loss = estimate_loss_linear(model, train_ds,
+                                                        batch_size, cfg.block_size, rng, eval_iters);
+
+                auto now = std::chrono::high_resolution_clock::now();
+                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start_time).count();
+
+                std::cout << "step " << std::setw(4) << step
+                          << " | train loss " << train_loss
+                          << " | grad_norm " << grad_norm
+                          << " | time " << elapsed << "s" << std::endl;
+
+                if (step > 0)
+                {
+                    save_checkpoint(model, optim, step);
+                }
+            }
+
+            optim.step();
+        }
+
+        auto end_time = std::chrono::high_resolution_clock::now();
+        auto total_sec = std::chrono::duration_cast<std::chrono::seconds>(end_time - start_time).count();
+        std::cout << "\nTraining completed in " << total_sec << "s" << std::endl;
+
+        model.save(MODEL_FILE);
+
+        if (std::filesystem::exists(CHECKPOINT_FILE))
+        {
+            std::filesystem::remove(CHECKPOINT_FILE);
+        }
     }
-
-    auto end_time = std::chrono::high_resolution_clock::now();
-    auto total_sec = std::chrono::duration_cast<std::chrono::seconds>(end_time - start_time).count();
-    std::cout << "\nTraining completed in " << total_sec << "s" << std::endl;
-
-    model.save(MODEL_FILE);
-
-    if (std::filesystem::exists(CHECKPOINT_FILE)) {
-        std::filesystem::remove(CHECKPOINT_FILE);
-    }
-
-    }
-    catch (const std::bad_alloc& e)
+    catch (const std::bad_alloc &e)
     {
         std::cerr << "Memory allocation failed: " << e.what() << std::endl;
         return 1;
     }
-    catch (const std::runtime_error& e)
+    catch (const std::runtime_error &e)
     {
         std::cerr << "Runtime error: " << e.what() << std::endl;
         return 1;
     }
-    catch (const std::exception& e)
+    catch (const std::exception &e)
     {
         std::cerr << "Error: " << e.what() << std::endl;
         return 1;
