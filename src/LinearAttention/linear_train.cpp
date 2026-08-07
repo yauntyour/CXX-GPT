@@ -166,8 +166,8 @@ int main(int argc, char **argv)
         LinearGPTConfig cfg;
         cfg.vocab_size = tokenizer.vocab_size();
         cfg.block_size = 256;
-        cfg.n_embd = 768;
-        cfg.n_layer = 12;
+        cfg.n_embd = 512;
+        cfg.n_layer = 8;
 
         size_t D = next_power_of_2(cfg.n_embd);
         std::cout << "Embedding dim: " << cfg.n_embd
