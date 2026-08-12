@@ -168,7 +168,7 @@ int main(int argc, char **argv)
         cfg.block_size = 256;
         cfg.n_embd = 256;
         cfg.n_head = 8;
-        cfg.N = 2;
+        cfg.N = 6;
 
         std::cout << "Embedding dim: " << cfg.n_embd
                   << ", heads: " << cfg.n_head
@@ -192,8 +192,8 @@ int main(int argc, char **argv)
 
         size_t batch_size = 32;
         int grad_accum = 4; // micro-batches per optimizer step
-        int num_epochs = 3;
-        int eval_interval = 500;
+        int num_epochs = 1;
+        int eval_interval = 1;
         int eval_iters = 10;
 
         size_t tokens_per_step = batch_size * (size_t)grad_accum * cfg.block_size;
@@ -236,13 +236,14 @@ int main(int argc, char **argv)
         size_t total_tokens = batch_size * cfg.block_size;
         size_t bytes = total_tokens * sizeof(int);
 
-        std::array<int*, 2> hx{}, hy{}; // pinned host (dataset slices)
-        std::array<int*, 2> dx{}, dy{}; // device (kernel inputs)
-        for (int s = 0; s < 2; s++) {
-            hx[s] = (int*)TensorN::PinnedMemoryPool::instance().acquire(bytes);
-            hy[s] = (int*)TensorN::PinnedMemoryPool::instance().acquire(bytes);
-            dx[s] = (int*)TensorN::CudaMemoryPool::instance().acquire(bytes);
-            dy[s] = (int*)TensorN::CudaMemoryPool::instance().acquire(bytes);
+        std::array<int *, 2> hx{}, hy{}; // pinned host (dataset slices)
+        std::array<int *, 2> dx{}, dy{}; // device (kernel inputs)
+        for (int s = 0; s < 2; s++)
+        {
+            hx[s] = (int *)TensorN::PinnedMemoryPool::instance().acquire(bytes);
+            hy[s] = (int *)TensorN::PinnedMemoryPool::instance().acquire(bytes);
+            dx[s] = (int *)TensorN::CudaMemoryPool::instance().acquire(bytes);
+            dy[s] = (int *)TensorN::CudaMemoryPool::instance().acquire(bytes);
         }
         // Non-blocking copy stream: uploads overlap with null-stream compute
         // instead of being implicitly serialized by legacy default-stream rules.
@@ -281,7 +282,6 @@ int main(int argc, char **argv)
         std::cout << "TF32 tensor-core math enabled for GEMMs" << std::endl;
 
         auto start_time = std::chrono::high_resolution_clock::now();
-        auto last_print_time = start_time;
 
         size_t slot = 0;
         upload_batch(slot);
@@ -319,20 +319,8 @@ int main(int argc, char **argv)
 
             if (micro_batches == (size_t)grad_accum)
             {
-                float avg_loss = window_loss / (float)grad_accum;
                 window_loss = 0.0f;
                 micro_batches = 0;
-
-                auto now = std::chrono::high_resolution_clock::now();
-                double step_sec = std::chrono::duration<double>(now - last_print_time).count();
-                last_print_time = now;
-                double tok_per_s = (step_sec > 0.0) ? tokens_per_step / step_sec : 0.0;
-
-                // Per-step loss + throughput.
-                std::cout << "step " << std::setw(4) << step
-                          << " | loss " << avg_loss
-                          << " | " << (unsigned long long)tok_per_s << " tok/s"
-                          << std::endl;
 
                 if (step % eval_interval == 0 || step == max_steps - 1)
                 {
@@ -340,20 +328,14 @@ int main(int argc, char **argv)
                     float train_loss = estimate_loss_two_stage(model, train_ds,
                                                                batch_size, cfg.block_size, rng, eval_iters);
 
+                    auto now = std::chrono::high_resolution_clock::now();
                     auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start_time).count();
 
                     std::cout << "step " << std::setw(4) << step
                               << " | train loss " << train_loss
-                              << " | accum loss " << avg_loss
                               << " | grad_norm " << grad_norm
                               << " | time " << elapsed << "s" << std::endl;
-
-                    if (step > 0)
-                    {
-                        save_checkpoint(model, optim, step);
-                    }
                 }
-
                 optim.step();
             }
         }

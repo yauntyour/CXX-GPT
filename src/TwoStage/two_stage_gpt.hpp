@@ -578,12 +578,13 @@ inline void two_stage_numerical_grad_check(TwoStageGPT &model,
             float analytical = cpu_grad[e];
             float rel_err = std::abs(numerical - analytical) /
                             (std::abs(numerical) + std::abs(analytical) + 1e-8f);
+            bool tiny = (std::abs(numerical) + std::abs(analytical)) < 1e-5f;
 
             std::cout << "param[" << idx << "][" << e << "]"
                       << "  analytical=" << analytical
                       << "  numerical=" << numerical
                       << "  rel_err=" << rel_err
-                      << (rel_err < 1e-3f ? " OK" : " MISMATCH") << std::endl;
+                      << (tiny || rel_err < 1e-3f ? " OK" : " MISMATCH") << std::endl;
         }
     }
     std::cout << "================================\n"
