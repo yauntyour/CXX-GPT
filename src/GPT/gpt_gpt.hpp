@@ -69,17 +69,20 @@ public:
 
 struct Linear {
     Param W, b;
+    bool use_bias;
     size_t in_feat, out_feat;
     CudaTensor<float> cached_input;
 
-    Linear(size_t in_features, size_t out_features, RNG& rng)
+    Linear(size_t in_features, size_t out_features, RNG& rng, bool bias = true)
         : W({out_features, in_features}), b({out_features}),
-          in_feat(in_features), out_feat(out_features)
+          use_bias(bias), in_feat(in_features), out_feat(out_features)
     {
         float kaiming = std::sqrt(2.0f / in_features);
         auto cpu_W = rng.normal_init_tensor({out_features, in_features}, kaiming);
         W.data = std::move(cpu_W);
     }
+
+    bool has_bias() const { return use_bias; }
 
     CudaTensor<float> forward(const CudaTensor<float>& x) {
         cached_input = x;
@@ -87,6 +90,7 @@ struct Linear {
         TensorN::cuda::transpose(W.data, Wt);
         CudaTensor<float> prod({x.shape()[0], out_feat});
         TensorN::cuda::matmul(x, Wt, prod);
+        if (!use_bias) return prod;
         CudaTensor<float> out(prod.shape());
         gpt_cuda::add_row_bias(prod, b.data, out);
         return out;
@@ -101,17 +105,18 @@ struct Linear {
         CudaTensor<float> new_grad(W.grad.shape());
         TensorN::cuda::add(W.grad, dW_mat, new_grad);
         W.grad = std::move(new_grad);
+        CudaTensor<float> dx({N, in_feat});
+        TensorN::cuda::matmul(dout, W.data, dx);
+        if (!use_bias) return dx;
         auto db_vec = TensorN::cuda::sum_axis(dout, 0);
         CudaTensor<float> new_b_grad(b.grad.shape());
         TensorN::cuda::add(b.grad, db_vec, new_b_grad);
         b.grad = std::move(new_b_grad);
-        CudaTensor<float> dx({N, in_feat});
-        TensorN::cuda::matmul(dout, W.data, dx);
         return dx;
     }
 
-    void zero_grad() { W.zero_grad(); b.zero_grad(); }
-    std::vector<Param*> parameters() { return {&W, &b}; }
+    void zero_grad() { W.zero_grad(); if (use_bias) b.zero_grad(); }
+    std::vector<Param*> parameters() { return use_bias ? std::vector<Param*>{&W, &b} : std::vector<Param*>{&W}; }
 };
 
 struct Embedding {
@@ -136,6 +141,13 @@ struct Embedding {
         return out;
     }
 
+    // Device-side path: indices already on GPU (no per-step malloc/copy).
+    CudaTensor<float> forward(const int* d_indices, size_t N) {
+        CudaTensor<float> out({N, embd_dim});
+        gpt_cuda::embedding_forward(weight.data, d_indices, out, N);
+        return out;
+    }
+
     void backward(const CudaTensor<float>& dout, const std::vector<int>& idxs) {
         size_t N = idxs.size();
         int* d_indices = nullptr;
@@ -143,6 +155,10 @@ struct Embedding {
         cudaMemcpy(d_indices, idxs.data(), N * sizeof(int), cudaMemcpyHostToDevice);
         gpt_cuda::embedding_backward(dout, d_indices, weight.grad, N);
         cudaFree(d_indices);
+    }
+
+    void backward(const CudaTensor<float>& dout, const int* d_indices, size_t N) {
+        gpt_cuda::embedding_backward(dout, d_indices, weight.grad, N);
     }
 
     void zero_grad() { weight.zero_grad(); }
@@ -211,13 +227,27 @@ inline std::pair<float, CudaTensor<float>> cross_entropy_loss(
     cudaMalloc(&d_targets, N * sizeof(int));
     cudaMemcpy(d_targets, targets.data(), N * sizeof(int), cudaMemcpyHostToDevice);
 
-    CudaTensor<float> probs(sh);
-    float loss = gpt_cuda::cross_entropy_loss_forward(logits, d_targets, probs, N, V);
+    float loss = gpt_cuda::cross_entropy_loss_forward(logits, d_targets, N, V);
 
     CudaTensor<float> dlogits(sh);
-    gpt_cuda::cross_entropy_loss_backward(probs, d_targets, dlogits, N, V);
+    gpt_cuda::cross_entropy_loss_backward(logits, d_targets, dlogits, N, V);
 
     cudaFree(d_targets);
+    return {loss, dlogits};
+}
+
+// Device-side targets variant: targets already on GPU (no per-step malloc/copy).
+inline std::pair<float, CudaTensor<float>> cross_entropy_loss(
+    const CudaTensor<float>& logits, const int* d_targets)
+{
+    auto sh = logits.shape();
+    size_t N = sh[0], V = sh[1];
+
+    float loss = gpt_cuda::cross_entropy_loss_forward(logits, d_targets, N, V);
+
+    CudaTensor<float> dlogits(sh);
+    gpt_cuda::cross_entropy_loss_backward(logits, d_targets, dlogits, N, V);
+
     return {loss, dlogits};
 }
 

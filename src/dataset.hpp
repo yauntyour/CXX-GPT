@@ -40,6 +40,10 @@ public:
     std::pair<std::vector<int>, std::vector<int>> next_batch(
         size_t batch_size, size_t block_size);
 
+    // Zero-alloc variant: writes directly into caller-provided buffers.
+    // Used by the pipelined training loop (pinned host memory).
+    void next_batch(int* x, int* y, size_t batch_size, size_t block_size);
+
 private:
     std::string filepath_;
     BPETokenizer* tok_ = nullptr;
@@ -242,6 +246,53 @@ inline std::pair<std::vector<int>, std::vector<int>> Dataset::next_batch(
     }
 
     return {x, y};
+}
+
+inline void Dataset::next_batch(int* x, int* y,
+    size_t batch_size, size_t block_size)
+{
+    if (!block_.empty()) {
+        size_t total = batch_size * block_size;
+        if (block_.size() <= total + 1) {
+            // Degenerate case: whole block in one batch, wrap within block.
+            for (size_t i = 0; i < total; i++) {
+                size_t p = (i + block_pos_) % block_.size();
+                size_t q = (p + 1) % block_.size();
+                x[i] = block_[p];
+                y[i] = block_[q];
+            }
+            return;
+        }
+        if (block_pos_ + total + 1 > block_.size()) {
+            block_pos_ = 0; // wrap at EOF
+        }
+        for (size_t i = 0; i < total; i++) {
+            x[i] = block_[block_pos_ + i];
+            y[i] = block_[block_pos_ + i + 1];
+        }
+        block_pos_ += total;
+        return;
+    }
+
+    size_t filled = 0;
+    while (filled < batch_size) {
+        if (buffer_pos_ >= buffer_.size()) {
+            refill_buffer();
+            if (buffer_.empty()) break;
+        }
+
+        const auto& doc = buffer_[buffer_pos_++];
+        size_t copy_len = std::min(doc.size(), block_size);
+        for (size_t s = 0; s < copy_len; s++) {
+            x[filled * block_size + s] = doc[s];
+            y[filled * block_size + s] = (s + 1 < doc.size()) ? doc[s + 1] : 0;
+        }
+        for (size_t s = copy_len; s < block_size; s++) {
+            x[filled * block_size + s] = 0;
+            y[filled * block_size + s] = 0;
+        }
+        filled++;
+    }
 }
 
 inline float estimate_loss(GPT& model, Dataset& ds,

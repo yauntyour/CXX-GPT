@@ -24,8 +24,8 @@ void layernorm_backward(const CudaTensor<float>& dout, const CudaTensor<float>& 
     CudaTensor<float>& dgamma, CudaTensor<float>& dbeta);
 
 float cross_entropy_loss_forward(const CudaTensor<float>& logits, const int* targets,
-    CudaTensor<float>& probs, size_t N, size_t V);
-void cross_entropy_loss_backward(const CudaTensor<float>& probs, const int* targets,
+    size_t N, size_t V);
+void cross_entropy_loss_backward(const CudaTensor<float>& logits, const int* targets,
     CudaTensor<float>& dlogits, size_t N, size_t V);
 
 void attention_mask(CudaTensor<float>& scores, size_t B, size_t S);

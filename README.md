@@ -82,6 +82,18 @@ cmake --build build --config Release
 ```
 训练相同参数量的 LinearGPT 模型，checkpoint 保存为 `linear_checkpoint.bin`，最终模型保存为 `linear_model.bin`。
 
+**TwoStageGPT（两阶段注意力）：**
+```bash
+./build/bin/Release/two_stage_train.exe
+```
+第一阶段为 FFN 升维扩展特征上的因果 Softmax MHA，第二阶段为 ELU+1 核线性注意力，最后接 FFN 与权重绑定 lm head。checkpoint 保存为 `two_stage_checkpoint.gguf`，最终模型保存为 `two_stage_model.gguf`。
+
+**CUDA 内核单元测试：**
+```bash
+./build/bin/Release/kernel_test.exe
+```
+将 fused 内核（Softmax MHA 前向/反向、ELU 核注意力前向/反向，以及大序列回退路径）与 CPU 参考实现逐元素对比（误差 ~1e-7）。
+
 ### 对话
 
 **Softmax GPT：**
@@ -92,6 +104,11 @@ cmake --build build --config Release
 **LinearGPT：**
 ```bash
 ./build/bin/Release/linear_demo.exe
+```
+
+**TwoStageGPT：**
+```bash
+./build/bin/Release/two_stage_demo.exe
 ```
 
 加载训练好的模型，启动交互式对话。
@@ -112,6 +129,12 @@ CXX-GPT/
 │       ├── linear_train.cpp        # LinearGPT 训练
 │       ├── linear_demo.cpp         # LinearGPT 交互式对话
 │       └── linear_cuda_kernels.cuh/.cu  # 线性注意力 CUDA 内核
+│   └── TwoStage/
+│       ├── two_stage_gpt.hpp       # TwoStageGPT 模型（Softmax MHA + ELU 核注意力）
+│       ├── two_stage_train.cpp     # TwoStageGPT 训练
+│       ├── two_stage_demo.cpp      # TwoStageGPT 交互式对话
+│       ├── two_stage_cuda_kernels.cuh/.cu  # 融合注意力 CUDA 内核（含回退路径）
+│       └── kernel_test.cpp         # CUDA 内核单元测试（对照 CPU 参考）
 ├── tokenizer/
 │   ├── tokenizer.json              # BPE 分词器模型
 │   └── tokenizer_config.json       # 分词器配置
@@ -133,6 +156,7 @@ CXX-GPT/
 | **GPT** | 仅解码器 Transformer，包含 Token + 位置嵌入、N 个 Transformer 块和 lm_head |
 | **Block** | 预归一化 LayerNorm → 因果自注意力 → LayerNorm → MLP (GELU) |
 | **LinearGPT** | 使用 Hadamard 矩阵 + Exp 特征映射实现线性注意力的变体 |
+| **TwoStageGPT** | 两阶段注意力：FFN 扩展特征的因果 Softmax MHA + ELU+1 核线性注意力（前缀和），权重绑定 lm head |
 | **TensorN** | 头文件-only C++ 张量库，支持 CPU (OpenBLAS) 和 GPU (CUDA) 后端 |
 | **CUDA 内核** | 为注意力、损失函数、优化器和归一化编写的融合前向/反向内核 |
 | **分词器** | BPE 分词器，6400 词汇量，支持 UTF-8 和特殊 token 处理 |

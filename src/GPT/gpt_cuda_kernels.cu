@@ -320,61 +320,133 @@ void layernorm_backward(const CudaTensor<float>& dout, const CudaTensor<float>& 
 }
 
 // ============================================================
-// Cross-entropy loss forward
-// probs = softmax(logits), return mean(-log(probs[i, targets[i]]))
+// Cross-entropy loss forward (fused logsumexp, no full softmax):
+//   loss_row = log(sum_j exp(logits_j)) - logits[target]
+// One block per row; block reduction in smem. No atomics.
 // ============================================================
-__global__ void cross_entropy_loss_fwd_kernel(const float* logits, const float* probs,
-                                               const int* targets, float* loss_out,
+__global__ void cross_entropy_loss_fwd_kernel(const float* logits,
+                                               const int* targets, float* loss_row,
                                                size_t N, size_t V) {
-    size_t i = blockIdx.x;
-    if (i >= N) return;
-    if (threadIdx.x != 0) return;
+    size_t row = blockIdx.x;
+    if (row >= N) return;
+    const float* rp = logits + row * V;
 
-    float p = fmaxf(probs[i * V + targets[i]], 1e-12f);
-    atomicAdd(loss_out, -logf(p));
+    extern __shared__ float smem[];
+    float m = -1e30f;
+    for (size_t j = threadIdx.x; j < V; j += blockDim.x)
+        m = fmaxf(m, rp[j]);
+    smem[threadIdx.x] = m;
+    __syncthreads();
+    for (size_t s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s)
+            smem[threadIdx.x] = fmaxf(smem[threadIdx.x], smem[threadIdx.x + s]);
+        __syncthreads();
+    }
+    m = smem[0];
+
+    float lsum = 0.0f;
+    for (size_t j = threadIdx.x; j < V; j += blockDim.x)
+        lsum += __expf(rp[j] - m);
+    smem[threadIdx.x] = lsum;
+    __syncthreads();
+    for (size_t s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s)
+            smem[threadIdx.x] += smem[threadIdx.x + s];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0)
+        loss_row[row] = __logf(smem[0]) + m - rp[targets[row]];
+}
+
+// Reduce per-row losses to one scalar (single block).
+__global__ void cross_entropy_loss_reduce_kernel(const float* loss_row, float* loss_out,
+                                                  size_t N) {
+    extern __shared__ float smem[];
+    float v = 0.0f;
+    for (size_t i = threadIdx.x; i < N; i += blockDim.x)
+        v += loss_row[i];
+    smem[threadIdx.x] = v;
+    __syncthreads();
+    for (size_t s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s)
+            smem[threadIdx.x] += smem[threadIdx.x + s];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0)
+        loss_out[0] = smem[0];
 }
 
 float cross_entropy_loss_forward(const CudaTensor<float>& logits, const int* targets,
-    CudaTensor<float>& probs, size_t N, size_t V)
+    size_t N, size_t V)
 {
-    TensorN::cuda::softmax(logits, probs, -1);
+    auto& pool = CudaMemoryPool::instance();
+    float* d_loss_row = static_cast<float*>(pool.acquire(N * sizeof(float)));
+    float* d_loss = static_cast<float*>(pool.acquire(sizeof(float)));
 
-    float* d_loss = nullptr;
-    cudaMalloc(&d_loss, sizeof(float));
-    cudaMemset(d_loss, 0, sizeof(float));
-
-    dim3 grid((unsigned int)N);
-    dim3 threads(1);
-    cross_entropy_loss_fwd_kernel<<<grid, threads>>>(
-        logits.device_ptr(), probs.device_ptr(), targets, d_loss, N, V);
+    size_t bt = 256;
+    size_t smem = bt * sizeof(float);
+    cross_entropy_loss_fwd_kernel<<<(unsigned)N, bt, smem>>>(
+        logits.device_ptr(), targets, d_loss_row, N, V);
+    CHECK_CUDA_ERROR(cudaGetLastError());
+    cross_entropy_loss_reduce_kernel<<<1, bt, smem>>>(d_loss_row, d_loss, N);
     CHECK_CUDA_ERROR(cudaGetLastError());
 
     float loss = 0.0f;
     cudaMemcpy(&loss, d_loss, sizeof(float), cudaMemcpyDeviceToHost);
-    cudaFree(d_loss);
+    pool.release(d_loss_row);
+    pool.release(d_loss);
     return loss / N;
 }
 
 // ============================================================
-// Cross-entropy backward: dlogits = (probs - one_hot(targets)) / N
+// Cross-entropy backward (softmax recomputed from logits):
+//   dlogits = (softmax(logits) - one_hot(targets)) / N
+// One block per row; smem holds the row max/sum between passes.
 // ============================================================
-__global__ void cross_entropy_bwd_kernel(float* dlogits, const float* probs,
-                                          const int* targets, size_t N, size_t V) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    size_t total = N * V;
-    if (idx >= total) return;
-    size_t i = idx / V;
-    size_t j = idx % V;
-    dlogits[idx] = (probs[idx] - (j == (size_t)targets[i] ? 1.0f : 0.0f)) / N;
+__global__ void cross_entropy_bwd_kernel(const float* logits,
+                                         const int* targets, float* dlogits,
+                                         size_t N, size_t V) {
+    size_t row = blockIdx.x;
+    if (row >= N) return;
+    const float* rp = logits + row * V;
+    float* dp = dlogits + row * V;
+
+    extern __shared__ float smem[];
+    float m = -1e30f;
+    for (size_t j = threadIdx.x; j < V; j += blockDim.x)
+        m = fmaxf(m, rp[j]);
+    smem[threadIdx.x] = m;
+    __syncthreads();
+    for (size_t s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s)
+            smem[threadIdx.x] = fmaxf(smem[threadIdx.x], smem[threadIdx.x + s]);
+        __syncthreads();
+    }
+    m = smem[0];
+
+    float lsum = 0.0f;
+    for (size_t j = threadIdx.x; j < V; j += blockDim.x)
+        lsum += __expf(rp[j] - m);
+    smem[threadIdx.x] = lsum;
+    __syncthreads();
+    for (size_t s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s)
+            smem[threadIdx.x] += smem[threadIdx.x + s];
+        __syncthreads();
+    }
+    float inv = 1.0f / smem[0];
+    int tgt = targets[row];
+    for (size_t j = threadIdx.x; j < V; j += blockDim.x)
+        dp[j] = (__expf(rp[j] - m) * inv - (j == (size_t)tgt ? 1.0f : 0.0f)) / (float)N;
 }
 
-void cross_entropy_loss_backward(const CudaTensor<float>& probs, const int* targets,
+void cross_entropy_loss_backward(const CudaTensor<float>& logits, const int* targets,
     CudaTensor<float>& dlogits, size_t N, size_t V)
 {
-    size_t total = N * V;
-    dim3 grid((total + BLOCK_SIZE - 1) / BLOCK_SIZE);
-    dim3 block(BLOCK_SIZE);
-    cross_entropy_bwd_kernel<<<grid, block>>>(dlogits.device_ptr(), probs.device_ptr(), targets, N, V);
+    size_t bt = 256;
+    size_t smem = bt * sizeof(float);
+    cross_entropy_bwd_kernel<<<(unsigned)N, bt, smem>>>(
+        logits.device_ptr(), targets, dlogits.device_ptr(), N, V);
     CHECK_CUDA_ERROR(cudaGetLastError());
 }
 
