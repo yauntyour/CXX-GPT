@@ -60,6 +60,30 @@ void kernel_attn_bwd_dKdV(const CudaTensor<float>& Q, const CudaTensor<float>& K
                           CudaTensor<float>& dK, CudaTensor<float>& dV,
                           size_t B, size_t S, size_t D, size_t E);
 
+// ============================================================
+// RoPE (rotary position embedding), applied in-place to Q and K.
+// Rows are (B*S, D) row-major; the position of row r is r % S.
+// The feature dim D is viewed as consecutive heads of width
+// head_dim (head_dim == D applies RoPE over the whole vector).
+// Backward applies the inverse rotation (negated angle), since
+// RoPE is an orthogonal map: dX = R(-p)^T dX_rot.
+// ============================================================
+
+void rope_fwd(CudaTensor<float>& Q, CudaTensor<float>& K,
+              size_t B, size_t S, size_t D, size_t head_dim);
+
+void rope_bwd(CudaTensor<float>& dQ, CudaTensor<float>& dK,
+              size_t B, size_t S, size_t D, size_t head_dim);
+
+// ============================================================
+// Exact GELU matching torch.nn.GELU() (erf form) and its
+// derivative. Used by the q/k/v expander FFNs and the final FFN
+// so the C++ port matches the PyTorch reference numerically.
+// ============================================================
+
+void gelu_exact(const CudaTensor<float>& A, CudaTensor<float>& C);
+void gelu_exact_deriv(const CudaTensor<float>& A, CudaTensor<float>& C);
+
 } // namespace two_stage_cuda
 
 #endif

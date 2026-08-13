@@ -64,6 +64,15 @@ add_executable(two_stage_demo
 target_include_directories(two_stage_demo PRIVATE src)
 target_link_libraries(two_stage_demo PRIVATE TensorN)
 
+# TwoStageGPT forward probe: dumps logits for PyTorch cross-checking
+add_executable(two_stage_probe
+    src/TwoStage/two_stage_probe.cpp
+    src/TwoStage/two_stage_cuda_kernels.cu
+    src/GPT/gpt_cuda_kernels.cu
+)
+target_include_directories(two_stage_probe PRIVATE src)
+target_link_libraries(two_stage_probe PRIVATE TensorN)
+
 # TwoStageGPT CUDA kernel unit test (CPU reference vs fused kernels)
 add_executable(kernel_test
     src/TwoStage/kernel_test.cpp
@@ -73,6 +82,6 @@ add_executable(kernel_test
 target_include_directories(kernel_test PRIVATE src)
 target_link_libraries(kernel_test PRIVATE TensorN)
 
-set_target_properties(gpt_train gpt_demo linear_train linear_demo two_stage_train two_stage_demo kernel_test preprocess_dataset PROPERTIES
+set_target_properties(gpt_train gpt_demo linear_train linear_demo two_stage_train two_stage_demo two_stage_probe kernel_test preprocess_dataset PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )

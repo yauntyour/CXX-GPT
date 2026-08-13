@@ -1808,6 +1808,121 @@ void kernel_attn_bwd_dKdV(const CudaTensor<float>& Q, const CudaTensor<float>& K
     CHECK_CUDA_ERROR(cudaGetLastError());
 }
 
+// ============================================================
+// RoPE: one thread per (row, pair-of-dims). Pairs are grouped in
+// consecutive heads of width head_dim:
+//   x'_{2i}   = x_{2i} * cos(p*w_i) - x_{2i+1} * sin(p*w_i)
+//   x'_{2i+1} = x_{2i} * sin(p*w_i) + x_{2i+1} * cos(p*w_i)
+//   w_i = base^(-2i / head_dim), base = 10000, p = row % S
+// sign = +1 for the forward rotation, -1 for the (orthogonal)
+// inverse used in the backward pass.
+// ============================================================
+__global__ void rope_kernel(
+    float* __restrict__ Q, float* __restrict__ K,
+    size_t B, size_t S, size_t D, size_t head_dim, float sign)
+{
+    const size_t npairs = D / 2;
+    const size_t pairs_per_head = head_dim / 2;
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total = B * S * npairs;
+    if (idx >= total)
+        return;
+
+    size_t row = idx / npairs;
+    size_t pair = idx % npairs;
+    float p = (float)(row % S);
+
+    size_t pair_in_head = pair % pairs_per_head;
+    size_t off = row * D + (pair / pairs_per_head) * head_dim + 2 * pair_in_head;
+
+    float ang = sign * p * __expf(-2.0f * (float)pair_in_head / (float)head_dim *
+                                  9.210340371976184f); // ln(10000)
+    float c = __cosf(ang);
+    float s = __sinf(ang);
+
+    if (Q)
+    {
+        float x0 = Q[off];
+        float x1 = Q[off + 1];
+        Q[off] = x0 * c - x1 * s;
+        Q[off + 1] = x0 * s + x1 * c;
+    }
+    if (K)
+    {
+        float x0 = K[off];
+        float x1 = K[off + 1];
+        K[off] = x0 * c - x1 * s;
+        K[off + 1] = x0 * s + x1 * c;
+    }
+}
+
+static void rope_launch(CudaTensor<float>& Q, CudaTensor<float>& K,
+                        size_t B, size_t S, size_t D, size_t head_dim, float sign)
+{
+    size_t total = B * S * (D / 2);
+    dim3 grid((unsigned)((total + 255) / 256));
+    dim3 block(256);
+    rope_kernel<<<grid, block>>>(Q.device_ptr(), K.device_ptr(),
+                                 B, S, D, head_dim, sign);
+    CHECK_CUDA_ERROR(cudaGetLastError());
+}
+
+void rope_fwd(CudaTensor<float>& Q, CudaTensor<float>& K,
+              size_t B, size_t S, size_t D, size_t head_dim)
+{
+    rope_launch(Q, K, B, S, D, head_dim, 1.0f);
+}
+
+void rope_bwd(CudaTensor<float>& dQ, CudaTensor<float>& dK,
+              size_t B, size_t S, size_t D, size_t head_dim)
+{
+    rope_launch(dQ, dK, B, S, D, head_dim, -1.0f);
+}
+
+// ============================================================
+// Exact GELU matching torch.nn.GELU() (erf form):
+//   gelu(x)      = 0.5 * x * (1 + erf(x / sqrt(2)))
+//   gelu'(x)     = 0.5 * (1 + erf(x / sqrt(2)))
+//                  + x * exp(-x^2 / 2) / sqrt(2*pi)
+// ============================================================
+__global__ void gelu_exact_kernel(const float* __restrict__ A, float* __restrict__ C,
+                                  size_t n)
+{
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    float x = A[idx];
+    C[idx] = 0.5f * x * (1.0f + erff(x * 0.7071067811865476f));
+}
+
+void gelu_exact(const CudaTensor<float>& A, CudaTensor<float>& C)
+{
+    size_t n = A.size();
+    dim3 grid((n + 255) / 256);
+    dim3 block(256);
+    gelu_exact_kernel<<<grid, block>>>(A.device_ptr(), C.device_ptr(), n);
+    CHECK_CUDA_ERROR(cudaGetLastError());
+}
+
+__global__ void gelu_exact_deriv_kernel(const float* __restrict__ A, float* __restrict__ C,
+                                        size_t n)
+{
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    float x = A[idx];
+    float a = x * 0.7071067811865476f;
+    C[idx] = 0.5f * (1.0f + erff(a)) +
+             x * __expf(-0.5f * x * x) * 0.3989422804014327f;
+}
+
+void gelu_exact_deriv(const CudaTensor<float>& A, CudaTensor<float>& C)
+{
+    size_t n = A.size();
+    dim3 grid((n + 255) / 256);
+    dim3 block(256);
+    gelu_exact_deriv_kernel<<<grid, block>>>(A.device_ptr(), C.device_ptr(), n);
+    CHECK_CUDA_ERROR(cudaGetLastError());
+}
+
 } // namespace two_stage_cuda
 
 #endif

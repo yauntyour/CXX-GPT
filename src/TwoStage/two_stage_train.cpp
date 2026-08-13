@@ -33,7 +33,7 @@ extern "C" void sigint_handler(int)
 }
 #endif
 
-static constexpr const char *CHECKPOINT_FILE = "models/two_stage_checkpoint.gguf";
+static constexpr const char *CHECKPOINT_FILE = "models/two_stage_model.gguf";
 static constexpr const char *MODEL_FILE = "models/two_stage_model.gguf";
 
 void save_checkpoint(const TwoStageGPT &model, const AdamW &optim, int step)
@@ -166,13 +166,13 @@ int main(int argc, char **argv)
         TwoStageConfig cfg;
         cfg.vocab_size = tokenizer.vocab_size();
         cfg.block_size = 256;
-        cfg.n_embd = 256;
-        cfg.n_head = 8;
-        cfg.N = 6;
+        cfg.n_embd = 512;
+        cfg.n_head = 64;
+        cfg.N = 8;
 
         std::cout << "Embedding dim: " << cfg.n_embd
                   << ", heads: " << cfg.n_head
-                  << ", head_dim: " << cfg.N * (cfg.n_embd / cfg.n_head)
+                  << ", head_dim: " << cfg.n_embd / cfg.n_head
                   << " (N=" << cfg.N << ")" << std::endl;
 
         RNG rng(42);
@@ -180,7 +180,7 @@ int main(int argc, char **argv)
         std::cout << "Model parameters: " << model.total_params() << std::endl;
 
         auto params = model.parameters();
-        AdamW optim(params, 3e-4f, 0.9f, 0.999f, 0.01f);
+        AdamW optim(params, 1e-3, 0.9f, 0.999f, 0.01f);
 
         auto compute_grad_norm = [&params]()
         {

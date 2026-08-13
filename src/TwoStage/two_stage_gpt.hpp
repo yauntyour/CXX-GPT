@@ -8,18 +8,19 @@
 
 using namespace TensorN;
 
-// Two-stage attention model:
-//   1) expanded-feature softmax MHA  (q/k/v through per-head FFN expanders)
+// Two-stage attention model (matches XiaoXi-LLM/model.py):
+//   1) softmax MHA on expanded features  (q/k/v through FFN expanders,
+//      output n_embd, viewed as n_head heads of head_dim = n_embd / n_head)
 //   2) ELU+1 linear "kernel" attention with causal prefix sums
 // then a final FFN and a weight-tied lm head. All projections are
-// bias-free, matching the reference PyTorch spec.
+// bias-free, GELU is the exact erf form, matching the PyTorch spec.
 struct TwoStageConfig
 {
     size_t vocab_size = 4096;
     size_t block_size = 64;
     size_t n_embd = 256;
     size_t n_head = 8;
-    size_t N = 2; // feature expansion factor: head_dim = N * (n_embd / n_head)
+    size_t N = 2; // FFN expansion factor: hidden dim = 4N * n_embd (head_dim = n_embd / n_head)
 };
 
 class TwoStageGPT
@@ -33,10 +34,10 @@ public:
     struct StageBlock
     {
         Linear attn_q, attn_k, attn_v; // n_embd -> n_embd
-        Linear q_ffn_fc, q_ffn_proj;   // n_embd -> 4N*n_embd -> N*n_embd
+        Linear q_ffn_fc, q_ffn_proj;   // n_embd -> 4N*n_embd -> n_embd
         Linear k_ffn_fc, k_ffn_proj;
         Linear v_ffn_fc, v_ffn_proj;
-        Linear lq_proj, lk_proj, lv_proj; // N*n_embd -> n_embd
+        Linear lq_proj, lk_proj, lv_proj; // n_embd -> n_embd
         Linear ffn_fc, ffn_proj;          // n_embd -> 4N*n_embd -> n_embd
 
         CudaTensor<float> Qc, Kc, Vc;       // after q/k/v proj
@@ -56,14 +57,14 @@ public:
               attn_k(n_embd, n_embd, rng, false),
               attn_v(n_embd, n_embd, rng, false),
               q_ffn_fc(n_embd, 4 * N * n_embd, rng, false),
-              q_ffn_proj(4 * N * n_embd, N * n_embd, rng, false),
+              q_ffn_proj(4 * N * n_embd, n_embd, rng, false),
               k_ffn_fc(n_embd, 4 * N * n_embd, rng, false),
-              k_ffn_proj(4 * N * n_embd, N * n_embd, rng, false),
+              k_ffn_proj(4 * N * n_embd, n_embd, rng, false),
               v_ffn_fc(n_embd, 4 * N * n_embd, rng, false),
-              v_ffn_proj(4 * N * n_embd, N * n_embd, rng, false),
-              lq_proj(N * n_embd, n_embd, rng, false),
-              lk_proj(N * n_embd, n_embd, rng, false),
-              lv_proj(N * n_embd, n_embd, rng, false),
+              v_ffn_proj(4 * N * n_embd, n_embd, rng, false),
+              lq_proj(n_embd, n_embd, rng, false),
+              lk_proj(n_embd, n_embd, rng, false),
+              lv_proj(n_embd, n_embd, rng, false),
               ffn_fc(n_embd, 4 * N * n_embd, rng, false),
               ffn_proj(4 * N * n_embd, n_embd, rng, false) {}
 
@@ -84,18 +85,21 @@ public:
 
             auto qf = q_ffn_fc.forward(Qc);
             qact = CudaTensor<float>(qf.shape());
-            TensorN::cuda::gelu(qf, qact);
+            two_stage_cuda::gelu_exact(qf, qact);
             Qx = q_ffn_proj.forward(qact);
 
             auto kf = k_ffn_fc.forward(Kc);
             kact = CudaTensor<float>(kf.shape());
-            TensorN::cuda::gelu(kf, kact);
+            two_stage_cuda::gelu_exact(kf, kact);
             Kx = k_ffn_proj.forward(kact);
 
             auto vf = v_ffn_fc.forward(Vc);
             vact = CudaTensor<float>(vf.shape());
-            TensorN::cuda::gelu(vf, vact);
+            two_stage_cuda::gelu_exact(vf, vact);
             Vx = v_ffn_proj.forward(vact);
+
+            // RoPE on stage-1 q/k (per head, head width Dh)
+            two_stage_cuda::rope_fwd(Qx, Kx, B, S, big, Dh);
 
             // stage 1: fused causal softmax MHA over the expanded heads
             ra = CudaTensor<float>({dim, big});
@@ -104,6 +108,9 @@ public:
             lqc = lq_proj.forward(ra);
             lkc = lk_proj.forward(ra);
             lvc = lv_proj.forward(ra);
+
+            // RoPE on stage-2 q/k (single head over the whole feature dim)
+            two_stage_cuda::rope_fwd(lqc, lkc, B, S, E, E);
 
             // stage 2: fused ELU+1 kernel attention (D == E == n_embd)
             den = CudaTensor<float>({dim});
@@ -118,7 +125,7 @@ public:
             auto ff = ffn_fc.forward(Ac);
             ffc_out = ff;
             CudaTensor<float> f_act(ff.shape());
-            TensorN::cuda::gelu(ff, f_act);
+            two_stage_cuda::gelu_exact(ff, f_act);
             return ffn_proj.forward(f_act);
         }
 
@@ -131,7 +138,7 @@ public:
             // final FFN
             auto d_ffn_proj = ffn_proj.backward(dout);
             CudaTensor<float> gd(ffc_out.shape());
-            gpt_cuda::gelu_deriv(ffc_out, gd);
+            two_stage_cuda::gelu_exact_deriv(ffc_out, gd);
             CudaTensor<float> d_act(d_ffn_proj.shape());
             TensorN::cuda::multiply(d_ffn_proj, gd, d_act);
             auto dA = ffn_fc.backward(d_act);
@@ -149,6 +156,9 @@ public:
             two_stage_cuda::kernel_attn_bwd_dKdV(lqc, lkc, lvc, dnum, dden,
                                                  dlk, dlv, B, S, E, E);
 
+            // un-rotate stage-2 q/k gradients to the pre-RoPE space
+            two_stage_cuda::rope_bwd(dlq, dlk, B, S, E, E);
+
             auto d_ra_lq = lq_proj.backward(dlq);
             auto d_ra_lk = lk_proj.backward(dlk);
             auto d_ra_lv = lv_proj.backward(dlv);
@@ -160,11 +170,13 @@ public:
             CudaTensor<float> dQx({dim, big}), dKx({dim, big}), dVx({dim, big});
             two_stage_cuda::fused_mha_bwd(Qx, Kx, Vx, ra, dra,
                                           dQx, dKx, dVx, B, S, H, Dh);
+            // un-rotate stage-1 q/k gradients to the pre-RoPE space
+            two_stage_cuda::rope_bwd(dQx, dKx, B, S, big, Dh);
 
             // q/k/v expander FFNs
             auto d_qproj = q_ffn_proj.backward(dQx);
             CudaTensor<float> gq(qact.shape());
-            gpt_cuda::gelu_deriv(qact, gq);
+            two_stage_cuda::gelu_exact_deriv(qact, gq);
             CudaTensor<float> dqact(d_qproj.shape());
             TensorN::cuda::multiply(d_qproj, gq, dqact);
             auto d_qfc = q_ffn_fc.backward(dqact);
@@ -172,7 +184,7 @@ public:
 
             auto d_kproj = k_ffn_proj.backward(dKx);
             CudaTensor<float> gk(kact.shape());
-            gpt_cuda::gelu_deriv(kact, gk);
+            two_stage_cuda::gelu_exact_deriv(kact, gk);
             CudaTensor<float> dkact(d_kproj.shape());
             TensorN::cuda::multiply(d_kproj, gk, dkact);
             auto d_kfc = k_ffn_fc.backward(dkact);
@@ -180,7 +192,7 @@ public:
 
             auto d_vproj = v_ffn_proj.backward(dVx);
             CudaTensor<float> gv(vact.shape());
-            gpt_cuda::gelu_deriv(vact, gv);
+            two_stage_cuda::gelu_exact_deriv(vact, gv);
             CudaTensor<float> dvact(d_vproj.shape());
             TensorN::cuda::multiply(d_vproj, gv, dvact);
             auto d_vfc = v_ffn_fc.backward(dvact);
@@ -239,7 +251,7 @@ public:
 
     TwoStageGPT(TwoStageConfig config, RNG &rng)
         : cfg(config),
-          head_dim(config.N * (config.n_embd / config.n_head)),
+          head_dim(config.n_embd / config.n_head),
           wte(config.vocab_size, config.n_embd, rng),
           blk(config.n_embd, config.N, config.n_head, rng)
     {

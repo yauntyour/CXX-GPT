@@ -440,6 +440,64 @@ int main()
         std::cout << "chunk dlv    maxdiff = " << max_abs_diff(t2v(dlv.toTensor()), rV2) << std::endl;
     }
 
+    // ---------------- RoPE ----------------
+    {
+        size_t B = 2, S = 6, D = 16, head_dim = 8, dim = B * S;
+        std::vector<float> Q(dim * D), K(dim * D);
+        for (auto &x : Q) x = frand();
+        for (auto &x : K) x = frand();
+        std::vector<float> Q0 = Q, K0 = K;
+
+        const float base = 10000.0f;
+        auto rope_one = [&](float &x0, float &x1, size_t p, size_t i, float sign)
+        {
+            float w = std::pow(base, -2.0f * (float)i / (float)head_dim);
+            float ang = sign * p * w;
+            float c = std::cos(ang), s = std::sin(ang);
+            float a = x0, b = x1;
+            x0 = a * c - b * s;
+            x1 = a * s + b * c;
+        };
+        auto ref_rope = [&](std::vector<float> &X, float sign)
+        {
+            for (size_t r = 0; r < dim; r++)
+            {
+                size_t p = r % S;
+                for (size_t h = 0; h < D / head_dim; h++)
+                    for (size_t i = 0; i < head_dim / 2; i++)
+                        rope_one(X[r * D + h * head_dim + 2 * i],
+                                 X[r * D + h * head_dim + 2 * i + 1], p, i, sign);
+            }
+        };
+
+        CudaTensor<float> cQ = CudaTensor<float>::fromTensor(Tensor<float>({dim, D}, Q));
+        CudaTensor<float> cK = CudaTensor<float>::fromTensor(Tensor<float>({dim, D}, K));
+        two_stage_cuda::rope_fwd(cQ, cK, B, S, D, head_dim);
+        ref_rope(Q, +1.0f);
+        ref_rope(K, +1.0f);
+        std::cout << "rope fwd Q   maxdiff = " << max_abs_diff(t2v(cQ.toTensor()), Q) << std::endl;
+        std::cout << "rope fwd K   maxdiff = " << max_abs_diff(t2v(cK.toTensor()), K) << std::endl;
+
+        std::vector<float> dQ(dim * D), dK(dim * D);
+        for (auto &x : dQ) x = frand();
+        for (auto &x : dK) x = frand();
+        std::vector<float> dQ0 = dQ, dK0 = dK;
+
+        CudaTensor<float> cdQ = CudaTensor<float>::fromTensor(Tensor<float>({dim, D}, dQ));
+        CudaTensor<float> cdK = CudaTensor<float>::fromTensor(Tensor<float>({dim, D}, dK));
+        two_stage_cuda::rope_bwd(cdQ, cdK, B, S, D, head_dim);
+        ref_rope(dQ, -1.0f);
+        ref_rope(dK, -1.0f);
+        std::cout << "rope bwd dQ  maxdiff = " << max_abs_diff(t2v(cdQ.toTensor()), dQ) << std::endl;
+        std::cout << "rope bwd dK  maxdiff = " << max_abs_diff(t2v(cdK.toTensor()), dK) << std::endl;
+
+        // round trip: fwd then inverse must restore the original values
+        CudaTensor<float> cQ2 = CudaTensor<float>::fromTensor(Tensor<float>({dim, D}, Q0));
+        two_stage_cuda::rope_fwd(cQ2, cQ2, B, S, D, head_dim);
+        two_stage_cuda::rope_bwd(cQ2, cQ2, B, S, D, head_dim);
+        std::cout << "rope roundtrip maxdiff = " << max_abs_diff(t2v(cQ2.toTensor()), Q0) << std::endl;
+    }
+
     std::cout << "done" << std::endl;
     return 0;
 }
